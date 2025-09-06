@@ -53,14 +53,14 @@ TOP_PCT_ANCHOR = 0.70             # global anchor selection (pick window len=0.5
 TOP_PCT_CORE_IN_ANCHOR = 0.50     # inside anchor: keep longest contiguous top-50% frames
 
 # Ω & template
-OMEGA_Q        = 0.70
-OMEGA_DIL      = 2
-OMEGA_MIN_BINS = 8                # force multi-bin support to avoid single-line
+OMEGA_Q        = 0.85
+OMEGA_DIL      = 3
+OMEGA_MIN_BINS = 12                # force multi-bin support to avoid single-line
 
 # Time confidence (applies to mask)
-CONF_TAU        = 0.86
+CONF_TAU        = 0.9
 CONF_EXP_AMP    = 0.85             # exponent for a_gate  (0.8~1.1)
-CONF_EXP_COS    = 1.05             # exponent for cosΩ
+CONF_EXP_COS    = 0.9             # exponent for cosΩ
 GAMMA_C_IN_MASK = 0.85             # M *= C^gamma
 
 # NNLS (Ω-weighted mel->linear)
@@ -73,7 +73,7 @@ MASK_GAMMA_OUT  = 0.9
 WIENER_BETA     = 1.5
 WIENER_ITERS    = 2
 
-FIRST_PASS_EXP  = 0.55            # raise M^(FIRST_PASS_EXP) to extract more energy in pass1
+FIRST_PASS_EXP  = 0.8            # raise M^(FIRST_PASS_EXP) to extract more energy in pass1
 
 # Used-frames & prev anchor suppression
 USED_DILATE_MS       = 80         # odd kernel enforced

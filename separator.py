@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Anchor-Refined Ω-NNLS AST Demixer (cosΩ-dominant confidence)
-- Confidence C(t) now driven almost entirely by cosΩ (shape match), not amplitude.
-- If the target is quiet (low a_raw on high-cos frames), adaptively strengthen cosΩ weighting.
-- Fuse ratio mask with a cosΩ gate so high-cos regions are opened even when amplitude is small.
-- Keeps previous speed-friendly choices (single 4.096s window, 0.512s anchor, CPU).
+Cos-only Mask + Presence-Gated, Soft-Ω Demixer (AST-guided)
+- C(t) = cosΩ, but forced to 0 if a_raw == 0 (hard rule)
+- Only frames with C(t) >= 0.6 are considered (hard time gate)
+- Mask uses ONLY cosΩ (no amplitude bias); extraction uses amplitude envelope
+- Soft Ω (halo+floor) to avoid single-line artifacts
+- Anchor: attn^α * purity^β ; inside-anchor top-50% core only (others zero-padded)
+- Per-pass residual update; used-frames + prev-anchor suppression
 
 Run:
   python separator.py --input mix.wav --output out --passes 3
@@ -21,15 +23,15 @@ import matplotlib.pyplot as plt
 from transformers import ASTFeatureExtractor, ASTForAudioClassification
 
 warnings.filterwarnings("ignore")
-torch.set_num_threads(4)  # predictable CPU latency
+torch.set_num_threads(4)
 
 # =========================
 # Config
 # =========================
-SR = 16000
-WIN_SEC   = 4.096                 # fixed input window (1.024*4)
-L_FIXED   = int(round(WIN_SEC * SR))
-ANCHOR_SEC = 0.512                # anchor length
+SR           = 16000
+WIN_SEC      = 4.096                 # fixed window (1.024*4)
+ANCHOR_SEC   = 0.512                 # anchor window
+L_FIXED      = int(round(WIN_SEC * SR))
 
 # STFT (10ms hop)
 N_FFT, HOP, WINLEN = 400, 160, 400
@@ -41,59 +43,58 @@ N_MELS = 128
 
 # Anchor score
 SMOOTH_T  = 19
-ALPHA_ATT = 0.80                  # attn^alpha
-BETA_PUR  = 1.20                  # purity^beta
-W_E       = 0.30                  # purity = W_E*energy + (1-W_E)*(1-entropy)
-TOP_PCT_ANCHOR = 0.70             # global anchor selection (pick window len=0.512)
-TOP_PCT_CORE_IN_ANCHOR = 0.50     # inside anchor: keep longest contiguous top-50% frames
+ALPHA_ATT = 0.80
+BETA_PUR  = 1.20
+W_E       = 0.30
+TOP_PCT_ANCHOR            = 0.70   # global
+TOP_PCT_CORE_IN_ANCHOR    = 0.50   # inside anchor top-50% contig
 
 # Ω & template
 OMEGA_Q        = 0.70
 OMEGA_DIL      = 2
-OMEGA_MIN_BINS = 8                # force multi-bin support to avoid single-line
+OMEGA_MIN_BINS = 10
 
-# Confidence (C(t)) — make cosΩ dominant
-CONF_TAU            = 0.86
-CONF_EXP_AMP        = 0.15        # ↓ almost ignore amplitude in confidence (was ~0.9–1.0)
-CONF_EXP_COS_BASE   = 1.6         # base exponent for cosΩ
-CONF_GAMMA_IN_MASK  = 1.05        # M *= C^gamma
+# Presence gate
+PRES_Q         = 0.20
+PRES_SMOOTH_T  = 9
 
-# Adaptive boost when target is quiet
-ADAPT_TOP_COS_PCT   = 0.10        # measure a_raw on top-10% cos frames
-ADAPT_QUIET_RATIO   = 0.22        # if median(a_raw on top-cos) < this * a_raw_95p -> quiet
-ADAPT_COS_EXP_GAIN  = 1.25        # multiply cos exponent
-ADAPT_GAMMA_GAIN    = 1.10        # multiply CONF_GAMMA_IN_MASK
-ADAPT_KAPPA_COS     = 0.75        # stronger cos fuse if quiet (see mask fuse)
-KAPPA_COS_DEFAULT   = 0.60        # default cos fuse
+# Cos-only mask shaping
+HALO_BINS         = 3
+OMEGA_CONTRAST    = 0.85
+OMEGA_FLOOR       = 0.08
+GAMMA_COS_IN_MASK = 1.35
+FIRST_PASS_MASK_EXP = 0.65
+WIENER_BETA       = 1.5
+WIENER_ITERS      = 2
 
-# NNLS (Ω-weighted mel->linear)
-NNLS_STEPS   = 8
-NNLS_LAMBDA  = 6.0
-NNLS_LR      = 0.10
+# Hard constraints (요청 반영)
+ARAW_ZERO_THR  = 1e-8      # a_raw ≤ 이 값이면 0으로 간주
+C_HARD_TAU     = 0.60      # C(t) ≥ 0.6만 취급
 
-# Mask / Wiener
-MASK_GAMMA_OUT  = 1.00
-WIENER_BETA     = 1.5
-WIENER_ITERS    = 2
-FIRST_PASS_EXP  = 0.55            # raise M^(FIRST_PASS_EXP) to extract more energy in pass1
+# Extraction amplitude (uses a_raw)
+AMP_POWER      = 1.00
+AMP_GAIN_MIN   = 0.85
+AMP_GAIN_MAX   = 1.35
+ENV_FADE_FR    = 4
 
-# Used-frames & prev anchor suppression
-USED_DILATE_MS       = 80         # odd kernel enforced
-USED_THRESHOLD       = 0.65       # frame extraction ratio
-ANCHOR_SUPPRESS_MS   = 200
-ANCHOR_SUPPRESS_GAIN = 0.5
-
-# Oversubtraction (time-domain LS with fades)
+# Oversubtraction (time-domain LS)
 DO_OVERSUB_TIME  = True
-LS_ALPHA_CLAMP   = (0.98, 1.20)
-LS_ALPHA_KAPPA   = 0.35           # extra gain above CONF_TAU
+CONF_TAU         = C_HARD_TAU   # 세그먼트 기준도 0.6로 통일
+LS_ALPHA_CLAMP   = (0.98, 1.22)
+LS_ALPHA_KAPPA   = 0.35
 FADE_MS          = 50
 MIN_SEG_MS       = 120
 MERGE_GAP_MS     = 60
 
+# Used-frames & prev-anchor suppression
+USED_THRESHOLD       = 0.65
+USED_DILATE_MS       = 80
+ANCHOR_SUPPRESS_MS   = 200
+ANCHOR_SUPPRESS_GAIN = 0.6
+
 # Loop
-MAX_PASSES = 3
-MIN_ERATIO = 0.01
+MAX_PASSES    = 3
+MIN_ERATIO    = 0.01
 
 # =========================
 # Utils
@@ -155,7 +156,6 @@ def stft_all(audio: np.ndarray, mel_fb_m2f: torch.Tensor):
     return st, mag, P, phase, mel_pow
 
 def bg_estimate(P: torch.Tensor, k: int = 101) -> torch.Tensor:
-    # channel-safe background avg along time
     return F.avg_pool1d(P.unsqueeze(0), kernel_size=k, stride=1, padding=k//2).squeeze(0).clamp_min(EPS)
 
 # =========================
@@ -193,7 +193,6 @@ def anchor_score(A_t: torch.Tensor, Pur: torch.Tensor) -> torch.Tensor:
 
 def pick_anchor_region(score: torch.Tensor, La: int) -> Tuple[int,int]:
     T = score.numel()
-    # choose best La window inside top-70% envelope
     thr = torch.quantile(score, TOP_PCT_ANCHOR)
     mask = (score >= thr).float().cpu().numpy().astype(np.int8)
     segs=[]
@@ -207,8 +206,7 @@ def pick_anchor_region(score: torch.Tensor, La: int) -> Tuple[int,int]:
         ker = torch.ones(La, device=score.device)/La
         conv = F.conv1d(score.view(1,1,-1), ker.view(1,1,-1), padding=La//2).view(-1)
         c = int(torch.argmax(conv).item())
-        s = max(0, min(T-La, c-La//2))
-        return s, s+La
+        s = max(0, min(T-La, c-La//2)); return s, s+La
     best_s, best_e, best_mean = 0, La, -1
     for a,b in segs:
         length=b-a
@@ -226,8 +224,8 @@ def pick_anchor_region(score: torch.Tensor, La: int) -> Tuple[int,int]:
 # =========================
 # Ω & Template
 # =========================
-def omega_support(anchor_mel: torch.Tensor) -> torch.Tensor:
-    med = anchor_mel.median(dim=1).values        # [M]
+def omega_support(Ablk: torch.Tensor) -> torch.Tensor:
+    med = Ablk.median(dim=1).values
     th  = torch.quantile(med, OMEGA_Q)
     mask = (med >= th).float()
     for _ in range(OMEGA_DIL):
@@ -241,120 +239,79 @@ def omega_support(anchor_mel: torch.Tensor) -> torch.Tensor:
     return mask  # [M]{0,1}
 
 def template_from_anchor_block(Ablk: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-    # Ablk: [M, La] (outside non-core frames already zero-padded)
     om = omega.view(-1,1)
-    w  = (Ablk * om).mean(dim=1) * omega          # Ω 내부 평균 (anchor-core 내)
+    w  = (Ablk * om).mean(dim=1) * omega
     w  = w / (w.sum() + EPS)
-    # tiny Ω-only frequency smooth (3-tap)
     w_sm = F.avg_pool1d(w.view(1,1,-1), kernel_size=3, stride=1, padding=1).view(-1)
-    w   = (w_sm * omega)
-    w   = w / (w.sum() + EPS)
-    return w  # [M]
+    w   = (w_sm * omega); w = w / (w.sum() + EPS)
+    return w
 
 # =========================
-# Scalars & Confidence
+# Presence gate & cosΩ
 # =========================
+def presence_from_energy(Xmel: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
+    om = omega.view(-1,1)
+    e_omega = (Xmel * om).sum(dim=0)                 # [T]
+    e_omega = smooth1d(e_omega, PRES_SMOOTH_T)
+    thr = torch.quantile(e_omega, PRES_Q)
+    thr = torch.clamp(thr, min=1e-10)
+    return (e_omega > thr).float()
+
 def amplitude_raw(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
     om = omega.view(-1,1)
     Xo = Xmel * om
     denom = (w_bar*w_bar).sum() + EPS
-    a_raw = (w_bar.view(1,-1) @ Xo).view(-1) / denom    # absolute amplitude (un-normalized)
+    a_raw = (w_bar.view(1,-1) @ Xo).view(-1) / denom
     return a_raw.clamp_min(0.0)
 
-def cos_similarity_over_omega(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
+def cos_similarity_over_omega(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, g_pres: torch.Tensor):
     om = omega.view(-1,1)
     Xo = Xmel * om
     wn = (w_bar * omega); wn = wn / (wn.norm(p=2) + 1e-8)
     Xn = Xo / (Xo.norm(p=2, dim=0, keepdim=True) + 1e-8)
-    cos = (wn.view(-1,1) * Xn).sum(dim=0).clamp(0,1)
-    return cos  # [T]
-
-def build_confidence(a_raw: torch.Tensor, cos_t: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
-    """
-    Make confidence dominated by cos_t, with light amplitude effect.
-    Also adapt the strength if the target is very quiet.
-    Returns: C(t), p_cos_used, kappa_cos_used
-    """
-    # base exponents
-    p_cos = CONF_EXP_COS_BASE
-    p_amp = CONF_EXP_AMP
-
-    # global amplitude scale
-    a95 = torch.quantile(a_raw, 0.95).item() + 1e-8
-    # top-cos frames
-    thr_cos = torch.quantile(cos_t, 1.0 - ADAPT_TOP_COS_PCT)
-    idx_top = (cos_t >= thr_cos)
-    if idx_top.any():
-        med_top = torch.median(a_raw[idx_top]).item()
-    else:
-        med_top = torch.median(a_raw).item()
-
-    quiet = (med_top < ADAPT_QUIET_RATIO * a95)
-
-    # adapt if quiet: strengthen cos role, and later fuse factor
-    kappa_cos = KAPPA_COS_DEFAULT
-    if quiet:
-        p_cos *= ADAPT_COS_EXP_GAIN
-        kappa_cos = ADAPT_KAPPA_COS
-
-    # normalized (only for shaping; the actual separation scale uses raw)
-    a_gate = norm01(smooth1d(a_raw, SMOOTH_T))
-    C = (a_gate.clamp(0,1)**p_amp) * (cos_t.clamp(0,1)**p_cos)
-    C = norm01(C)
-    return C, p_cos, kappa_cos
+    cos_raw = (wn.view(-1,1) * Xn).sum(dim=0).clamp(0,1)
+    return cos_raw * g_pres  # presence==0 -> cos==0
 
 # =========================
-# Ω-weighted NNLS back-proj
+# Soft Ω (halo+floor) & mask
 # =========================
-def nnls_weighted_backproject(S_mel: torch.Tensor, mel_fb_m2f: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-    M, Fbins = mel_fb_m2f.shape
-    Mb, T = S_mel.shape
-    assert Mb == M
-    mel_pinv = torch.linalg.pinv(mel_fb_m2f)      # [F,M]
-    S_lin = (mel_pinv @ S_mel).clamp_min(0.0)     # [F,T]
+def soften_omega_linear(omega_lin: torch.Tensor, halo_bins: int = HALO_BINS,
+                        contrast: float = OMEGA_CONTRAST, floor_out: float = OMEGA_FLOOR):
+    k = 2*halo_bins + 1
+    x = omega_lin.view(1,1,-1).float()
+    soft = F.avg_pool1d(x, kernel_size=k, stride=1, padding=halo_bins).view(-1)
+    soft = floor_out + contrast * (soft - soft.min()) / (soft.max() - soft.min() + 1e-8) * (1.0 - floor_out)
+    return soft.clamp(0,1)
 
-    omega = omega.view(-1,1)
-    W = 1.0 + NNLS_LAMBDA * omega
-    WT2 = (W*W)
+def make_mask_cos_only(P: torch.Tensor, omega_lin: torch.Tensor, cos_t: torch.Tensor,
+                       C_gate: torch.Tensor, pass_idx: int) -> torch.Tensor:
+    # cos-only + hard C(t) gate
+    cos_eff = cos_t.clamp(0,1).pow(GAMMA_COS_IN_MASK)
+    cos_eff = cos_eff * C_gate  # <== only C>=tau frames survive (others 0)
 
-    Mel  = mel_fb_m2f
-    MelT = mel_fb_m2f.T
+    omega_soft = soften_omega_linear(omega_lin)
+    M0 = (omega_soft.view(-1,1) * cos_eff.view(1,-1)).clamp(0,1)
 
-    for _ in range(NNLS_STEPS):
-        R = (Mel @ S_lin) - S_mel
-        G = MelT @ (WT2 * R)
-        S_lin = (S_lin - NNLS_LR * G).clamp_min(0.0)
-    return S_lin.clamp_min(0.0)
+    # small blur
+    M0 = F.avg_pool2d(M0.unsqueeze(0).unsqueeze(0), kernel_size=3, stride=1, padding=1).squeeze()
 
-# =========================
-# Mask & Reconstruction
-# =========================
-def make_mask(S_lin: torch.Tensor, P: torch.Tensor,
-              omega_lin: torch.Tensor, C: torch.Tensor,
-              kappa_cos: float):
-    # ratio mask from back-projection
-    M_ratio = (S_lin / (P + EPS)).clamp(0.0, 1.0)
-    M_ratio = F.avg_pool2d(M_ratio.unsqueeze(0).unsqueeze(0), kernel_size=3, stride=1, padding=1).squeeze()
+    if pass_idx == 0 and FIRST_PASS_MASK_EXP != 1.0:
+        M0 = M0.pow(FIRST_PASS_MASK_EXP).clamp(0,1)
 
-    # cos gate lifted to linear freqs (Ω support only)
-    M_cos = omega_lin.view(-1,1) * C.view(1,-1)
-
-    # fuse: 1 - (1 - M_ratio)*(1 - kappa*M_cos)
-    M = 1.0 - (1.0 - M_ratio) * (1.0 - kappa_cos * M_cos)
-    # time-confidence sharpening
-    M = M * (C.view(1,-1).pow(CONF_GAMMA_IN_MASK))
-    # outside exponent
-    M = M.pow(MASK_GAMMA_OUT)
-
-    # Wiener refinement
-    m = M.clone()
+    # Wiener
+    m = M0.clone()
     for _ in range(WIENER_ITERS):
         sp  = (m ** WIENER_BETA) * P
         npw = ((1 - m) ** WIENER_BETA) * P
         m   = (sp / (sp + npw + EPS)).clamp(0.0, 1.0)
-    return m.clamp(0.0, 1.0)
+    # keep hard time gate after Wiener as well (idempotent)
+    m = m * C_gate.view(1,-1)
+    return m.clamp(0,1)
 
-def reconstruct(mag: torch.Tensor, phase: torch.Tensor, M_lin: torch.Tensor):
+# =========================
+# Reconstruction + amplitude gain + oversub
+# =========================
+def reconstruct_from_mask(mag: torch.Tensor, phase: torch.Tensor, M_lin: torch.Tensor):
     stft_full = torch.polar(mag, phase)
     stft_src  = (M_lin.clamp(0,1))**0.5 * stft_full
     stft_res  = stft_full - stft_src
@@ -362,13 +319,33 @@ def reconstruct(mag: torch.Tensor, phase: torch.Tensor, M_lin: torch.Tensor):
                       window=WINDOW, center=True, length=L_FIXED)
     res = torch.istft(stft_res, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN,
                       window=WINDOW, center=True, length=L_FIXED)
-    e_src = float((src**2).sum()); e_tot = e_src + float((res**2).sum())
-    er = (e_src / (e_tot + EPS)) if e_tot>0 else 0.0
-    return src.detach().cpu().numpy(), res.detach().cpu().numpy(), er
+    return src.detach().cpu().numpy(), res.detach().cpu().numpy()
 
-# =========================
-# Confidence segments & oversub
-# =========================
+def build_amp_envelope(a_raw: torch.Tensor, g_pres: torch.Tensor) -> np.ndarray:
+    # normalize on presence frames
+    a = a_raw.clone()
+    pres_idx = (g_pres > 0.5)
+    if pres_idx.any():
+        med = a[pres_idx].median().item()
+        if med > 1e-8:
+            a = a / med
+    a = a.pow(AMP_POWER)
+    a = torch.clamp(a, AMP_GAIN_MIN, AMP_GAIN_MAX)
+    # zero out where no presence
+    a = a * (g_pres > 0.5).float()
+    # mild smoothing
+    a = smooth1d(a, 5)
+    # upsample
+    env = F.interpolate(a.view(1,1,-1), size=L_FIXED, mode="linear", align_corners=False).view(-1)
+    # optional frame-edge fades
+    if ENV_FADE_FR > 0:
+        win = torch.ones_like(a)
+        up  = 0.5 - 0.5*torch.cos(torch.linspace(0, np.pi, ENV_FADE_FR, device=a.device))
+        win[:ENV_FADE_FR] = up; win[-ENV_FADE_FR:] = torch.flip(up, [0])
+        win = F.interpolate(win.view(1,1,-1), size=L_FIXED, mode="linear", align_corners=False).view(-1)
+        env = env * win
+    return env.detach().cpu().numpy()
+
 def segments_from_conf(C: torch.Tensor, tau: float, T: int) -> List[Tuple[int,int]]:
     mask = (C >= tau).float().cpu().numpy().astype(np.int32)
     segs=[]
@@ -378,7 +355,6 @@ def segments_from_conf(C: torch.Tensor, tau: float, T: int) -> List[Tuple[int,in
         j=i
         while j<T and mask[j]==1: j+=1
         segs.append((i,j)); i=j
-    # 최소 길이/merge
     min_len = int(round((MIN_SEG_MS/1000.0)*SR/HOP))
     merge_gap = int(round((MERGE_GAP_MS/1000.0)*SR/HOP))
     segs = [s for s in segs if s[1]-s[0] >= min_len]
@@ -400,11 +376,9 @@ def oversub_time(mix: np.ndarray, src: np.ndarray, segs: List[Tuple[int,int]], C
         x = torch.from_numpy(mix[s_s:e_s]); y = torch.from_numpy(src[s_s:e_s])
         den = float((y*y).sum().item()) + 1e-8
         alpha = float((x*y).sum().item()/den)
-        # clamp + confidence gain
         alpha = float(np.clip(alpha, LS_ALPHA_CLAMP[0], LS_ALPHA_CLAMP[1]))
         c_avg = float(C[s:e].mean().item())
         alpha *= (1.0 + LS_ALPHA_KAPPA * max(0.0, c_avg - CONF_TAU))
-        # fades
         if fade>0:
             w = np.ones(e_s - s_s, dtype=np.float32)
             up = 0.5 - 0.5*np.cos(np.linspace(0, np.pi, fade, dtype=np.float32))
@@ -415,32 +389,36 @@ def oversub_time(mix: np.ndarray, src: np.ndarray, segs: List[Tuple[int,int]], C
     return out
 
 # =========================
-# Debug plot
+# Debug
 # =========================
 def debug_plot(pass_idx:int, score:torch.Tensor, a_raw:torch.Tensor,
-               cos_t:torch.Tensor, C:torch.Tensor, P:torch.Tensor, M_lin:torch.Tensor,
-               s:int, e:int, core_s_rel:int, core_e_rel:int, out_png:str, title:str):
+               cos_t:torch.Tensor, C_t:torch.Tensor,
+               P:torch.Tensor, M_lin:torch.Tensor,
+               s:int, e:int, core_s_rel:int, core_e_rel:int,
+               out_png:str, title:str):
     fbins, T = P.shape
     t = np.arange(T) * HOP / SR
     fig, ax = plt.subplots(2,3, figsize=(15,8))
 
-    # 1) Anchor score + anchor + anchor-core
+    # 1) Anchor score + windows
     ax[0,0].plot(t, to_np(score), lw=1.2)
     ax[0,0].axvspan(s*HOP/SR, e*HOP/SR, color='orange', alpha=0.20, label='anchor')
     cs = s + core_s_rel; ce = s + core_e_rel
     ax[0,0].axvspan(cs*HOP/SR, ce*HOP/SR, color='red', alpha=0.20, label='anchor-core')
     ax[0,0].legend(); ax[0,0].set_title("Anchor score"); ax[0,0].set_ylim([0,1.05])
 
-    # 2) Scalars: a_raw (norm) & cosΩ
-    ar = to_np(a_raw); csim = to_np(cos_t)
-    ar_n = (ar - ar.min()) / (ar.max()-ar.min()+1e-8)
+    # 2) Scalars: a_raw(norm) & cosΩ & C(t)
+    ar = to_np(a_raw); ar_n = (ar - ar.min())/(ar.max()-ar.min()+1e-8)
     ax[0,1].plot(t, ar_n, label='a_raw (norm)', lw=1.0)
-    ax[0,1].plot(t, csim,  label='cosΩ', lw=1.0, alpha=0.9)
+    ax[0,1].plot(t, to_np(cos_t), label='cosΩ', lw=1.0)
+    ax[0,1].plot(t, to_np(C_t), label=f'C(t) (>= {C_HARD_TAU:.2f} only)', lw=1.0, alpha=0.85)
+    ax[0,1].axhline(C_HARD_TAU, color='r', ls='--', alpha=0.7)
     ax[0,1].legend(); ax[0,1].set_ylim([0,1.05]); ax[0,1].set_title("Scalars")
 
-    # 3) Confidence C(t)
-    ax[0,2].plot(t, to_np(C), color='purple'); ax[0,2].axhline(CONF_TAU, color='r', ls='--')
-    ax[0,2].set_ylim([0,1.05]); ax[0,2].set_title("Confidence C(t) ~ cosΩ^p · a_gate^q")
+    # 3) Mask stats (frame mean)
+    m_mean = to_np(M_lin.mean(dim=0))
+    ax[0,2].plot(t, m_mean, color='purple'); ax[0,2].set_ylim([0,1.05])
+    ax[0,2].set_title("Mask frame-mean")
 
     # 4) Spec(dB)
     spec_db = 20 * torch.log10(P.sqrt() + 1e-10)
@@ -481,11 +459,10 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     Pur  = purity_from_P(P)
     Sc   = anchor_score(A_t, Pur)
 
-    # Suppress used frames (length-invariant)
+    # Suppress used frames
     if used_mask_prev is not None:
         um = align_len_1d(used_mask_prev, T, device=Sc.device, mode="linear")
-        k = int(round((USED_DILATE_MS/1000.0)*SR/HOP))
-        k = ensure_odd(max(1, k))
+        k = int(round((USED_DILATE_MS/1000.0)*SR/HOP)); k = ensure_odd(max(1,k))
         ker = torch.ones(k, device=Sc.device)/k
         um = (F.conv1d(um.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1) > 0.2).float()
         Sc = Sc * (1 - 0.85 * um)
@@ -497,16 +474,17 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         sigma = int(round((ANCHOR_SUPPRESS_MS/1000.0)*SR/HOP))
         idx = torch.arange(T, device=Sc.device) - ca
         Sc = Sc * (1 - ANCHOR_SUPPRESS_GAIN * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
+        core_s = max(0, ca - La//2); core_e = min(T, ca + La//2)
+        Sc[core_s:core_e] *= 0.2
 
     # Global anchor [s:e] (len=La)
     s, e = pick_anchor_region(Sc, La)
 
-    # refine anchor core inside [s:e] with top-50% contiguous window
+    # Inside-anchor: pick contiguous top-50% core; zero-pad others
     local = Sc[s:e]
     thr_in = torch.quantile(local, TOP_PCT_CORE_IN_ANCHOR)
     mk = (local >= thr_in).float().cpu().numpy().astype(np.int8)
-    best = (0,0,0)
-    i=0
+    best = (0,0,0); i=0
     while i<mk.size:
         if mk[i]==0: i+=1; continue
         j=i
@@ -514,71 +492,73 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         if j-i>best[2]: best=(i,j,j-i)
         i=j
     core_s_rel, core_e_rel = best[0], best[1]
-    # Build anchor mel block, zero-pad outside core
     Ablk = Xmel[:, s:e].clone()
-    if core_s_rel>0:    Ablk[:, :core_s_rel] = 0
-    if core_e_rel<La:   Ablk[:, core_e_rel:] = 0
+    if core_s_rel>0:  Ablk[:, :core_s_rel] = 0
+    if core_e_rel<La: Ablk[:, core_e_rel:] = 0
 
     # Ω & template
-    omega = omega_support(Ablk)                         # [M]
-    w_bar = template_from_anchor_block(Ablk, omega)     # [M]
+    omega = omega_support(Ablk)                       # [M]
+    w_bar = template_from_anchor_block(Ablk, omega)   # [M]
 
     # Scalars
-    a_raw = amplitude_raw(Xmel, w_bar, omega)           # absolute (for scale only)
-    cos_t = cos_similarity_over_omega(Xmel, w_bar, omega)  # shape-only match
+    a_raw = amplitude_raw(Xmel, w_bar, omega)         # [T]
+    g_pres = presence_from_energy(Xmel, omega)        # [T]
+    cos_t_raw = cos_similarity_over_omega(Xmel, w_bar, omega, g_pres)  # [T], already 0 when presence==0
 
-    # Confidence dominated by cosΩ (adaptive if quiet)
-    C, p_cos_used, kappa_cos = build_confidence(a_raw, cos_t)
+    # ===== Hard rule: if a_raw == 0 -> C(t) = 0  =====
+    a_nz = (a_raw > ARAW_ZERO_THR).float()
+    C_t = cos_t_raw * a_nz
+    # ===== Hard gate: only frames with C(t) >= 0.6 considered =====
+    C_gate = (C_t >= C_HARD_TAU).float()
 
-    # Source mel power (shape fixed, scale = a_raw)
-    S_mel = w_bar.view(-1,1) * a_raw.view(1,-1)                 # [M,T]
-
-    # Back-projection (Ω-weighted NNLS)
-    S_lin = nnls_weighted_backproject(S_mel, mel_fb_m2f, omega) # [F,T]
-
-    # Map Ω(mel) -> Ω(linear) for cos fuse support
+    # Map Ω(mel)->Ω(linear) for freq weighting
     omega_lin = ((mel_fb_m2f.T @ omega).clamp_min(0.0) > 1e-12).float()  # [F]
 
-    # Mask with cosΩ fusion + confidence weighting
-    M_lin = make_mask(S_lin, P, omega_lin, C, kappa_cos)
+    # Mask (cos-only with hard C-gate) → reconstruction
+    M_lin = make_mask_cos_only(P, omega_lin, C_t, C_gate, pass_idx)
+    src_masked, _res_dummy = reconstruct_from_mask(mag, phase, M_lin)
 
-    # First pass energy push
-    if pass_idx == 0:
-        M_lin = M_lin.pow(FIRST_PASS_EXP)
+    # Frame-wise amplitude envelope (only where presence==1)
+    env = build_amp_envelope(a_raw, g_pres)           # [L_FIXED]
+    src_amp = src_masked * env                        # final source (time domain)
 
-    # Reconstruct
-    src, res, er = reconstruct(mag, phase, M_lin)
-
-    # Optional oversubtraction on confident segments
+    # Residual
+    res = audio - src_amp
     if DO_OVERSUB_TIME:
-        segs = segments_from_conf(C, CONF_TAU, T)
-        res = oversub_time(res, src, segs, C)
+        segs = segments_from_conf(C_t, CONF_TAU, T)
+        res = oversub_time(res, src_amp, segs, C_t)
+
+    # ER (after amp & oversub)
+    e_src = float(np.sum(src_amp**2)); e_res = float(np.sum(res**2))
+    er = e_src / (e_src + e_res + 1e-12)
 
     # Used-frame mask for next pass
     r_t = (M_lin * P).sum(dim=0) / (P.sum(dim=0) + 1e-8)
-    used_mask = (r_t >= USED_THRESHOLD).float()
+    used_energy = (r_t >= USED_THRESHOLD).float()
+    used_mask = torch.maximum(used_energy, (C_t >= max(0.9, C_HARD_TAU)).float())
 
     elapsed = time.time() - t0
 
     # Debug
     if out_dir:
         png = os.path.join(out_dir, f"debug_pass_{pass_idx+1}.png")
-        debug_plot(pass_idx, Sc, a_raw, cos_t, C, P, M_lin,
+        debug_plot(pass_idx, Sc, a_raw, C_t, C_gate, P, M_lin,
                    s, e, core_s_rel, core_e_rel, png,
-                   title=f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s | ER={er*100:.1f}% | p_cos={p_cos_used:.2f}, κ={kappa_cos:.2f}")
+                   title=f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s | ER={er*100:.1f}%")
 
     info = {
         "er": er,
         "elapsed": elapsed,
         "anchor": (s*HOP/SR, e*HOP/SR),
+        "core":   ((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR),
     }
-    return src, res, er, used_mask, info
+    return src_amp, res, er, used_mask, info
 
 # =========================
 # Main
 # =========================
 def main():
-    ap=argparse.ArgumentParser(description="Anchor-Refined Ω-NNLS AST Demixer (cosΩ-dominant confidence)")
+    ap=argparse.ArgumentParser(description="Cos-only Mask, Presence-Gated Soft-Ω Demixer (C(t) hard rules)")
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--passes", type=int, default=MAX_PASSES)
@@ -588,7 +568,7 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     audio0 = load_fixed_audio(args.input)
-    print(f"\n{'='*64}\n🎵 Anchor-Refined Ω-NNLS (cosΩ-dominant)\n{'='*64}")
+    print(f"\n{'='*64}\n🎵 Cos-only Mask + Presence-Gated Soft-Ω Demixer\n{'='*64}")
     print(f"Input: fixed {WIN_SEC:.3f}s, Anchor: {ANCHOR_SEC:.3f}s, Passes: {args.passes}")
 
     # Mel FB: [F,M] -> [M,F]
@@ -597,13 +577,13 @@ def main():
         n_freqs=fbins, f_min=0.0, f_max=SR/2, n_mels=N_MELS,
         sample_rate=SR, norm="slaney"
     )
-    mel_fb_m2f = mel_fb_f2m.T.contiguous()  # [M,F]
+    mel_fb_m2f = mel_fb_f2m.T.contiguous()
 
     # AST (CPU)
     extractor = ASTFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
     ast_model = ASTForAudioClassification.from_pretrained(
         "MIT/ast-finetuned-audioset-10-10-0.4593",
-        attn_implementation="eager"  # avoid fallback warning
+        attn_implementation="eager"
     ).eval()
 
     cur = audio0.copy()
@@ -619,7 +599,8 @@ def main():
             used_mask_prev, prev_anchors,
             pass_idx=i, out_dir=None if args.no_debug else args.output
         )
-        print(f"⏱️ pass{i+1}: {info['elapsed']:.3f}s | anchor {info['anchor'][0]:.2f}-{info['anchor'][1]:.2f}s | ER={er*100:.1f}%")
+        print(f"⏱️ pass{i+1}: {info['elapsed']:.3f}s | anchor {info['anchor'][0]:.2f}-{info['anchor'][1]:.2f}s"
+              f" | core {info['core'][0]:.2f}-{info['core'][1]:.2f}s | ER={er*100:.1f}%")
 
         if er < MIN_ERATIO:
             print("   ⚠️ Too little energy; stopping.")

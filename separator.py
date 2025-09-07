@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Final Version: AST-guided Source Separator
-Features:
-- Sigmoid Soft Masking based purely on Cosine Similarity.
-- Peak-first anchor and core selection for stability.
-- Frequency-domain subtraction for precision.
-- Peak Normalization for consistent output volume.
-- Residual Clipping for a clean residual file.
-- Linear Amplitude visualization for intuitive analysis.
+AST-guided Source Separator — Leaky+Saturating Cosine Gate (Full)
+
+What this version does:
+- Time selection/weighting is purely cosine-similarity-driven with a leaky + saturating gate:
+  * cos <= tau - band_low         -> gate = 0   (hard off, no leak)
+  * tau - band_low < cos < tau    -> gate rises 0 -> leak_at_tau (small leak)
+  * tau <= cos < tau + band_high  -> gate rises leak_at_tau -> 1 (fast ramp)
+  * cos >= tau + band_high        -> gate = 1   (saturated)
+  -> time_weight = cos * gate  (so high-similarity regions follow cos exactly)
+- No presence gate, no a_raw gate, no sigmoid smoothstep shaping elsewhere.
+- Anchor selection with energy validation (>= 0.5% of total).
+- Continuous mel->linear frequency weights (not binary).
+- Complex-domain subtraction, per-pass residual pruning (<= 0.5% per-frame energy), peak-normalized sources.
+
+Inputs/Outputs:
+- Fixed 4.096 s mono input (resampled to 16 kHz if needed), multiple passes (default 3).
+- Saves per-pass extracted sources and final residual.
+
+Dependencies: torch, torchaudio, transformers, matplotlib, numpy
 """
 
 import os, time, warnings, argparse
@@ -32,12 +43,15 @@ ANCHOR_SEC        = 0.512
 L_FIXED           = int(round(WIN_SEC * SR))
 
 # === Final Output Processing ===
-NORMALIZE_TARGET_PEAK = 0.95 # 최대 볼륨의 95% 크기로 표준화
-RESIDUAL_CLIP_THR = 0.0005 # 최종 잔여물의 진폭이 이 값보다 작으면 0으로 만듦
+NORMALIZE_TARGET_PEAK = 0.95
+RESIDUAL_CLIP_THR     = 0.0005
 
-# === Sigmoid Soft Masking Parameters ===
-MASK_SIGMOID_CENTER = 0.6   # 마스크가 0.5가 되는 cosΩ 값 (중심점)
-MASK_SIGMOID_SLOPE  = 15.0  # S-커브의 경사. 높을수록 하드 마스크처럼 날카로워짐
+# === Cosine→Leaky + Saturating time gate ===
+TIME_TAU          = 0.60   # center threshold
+TIME_BAND_LOW     = 0.05   # (tau - band_low, tau): 0 -> leak_at_tau
+TIME_BAND_HIGH    = 0.04   # (tau, tau + band_high): leak_at_tau -> 1; >= tau+band_high => 1
+TIME_LEAK_AT_TAU  = 0.10   # gate value exactly at tau (small leak)
+TIME_USE_COS_WEIGHTED = True  # True => time_weight = cos * gate (recommended)
 
 # STFT (10ms hop)
 N_FFT, HOP, WINLEN = 400, 160, 400
@@ -59,19 +73,18 @@ OMEGA_Q           = 0.70
 OMEGA_DIL         = 2
 OMEGA_MIN_BINS    = 10
 
-# Presence gate
-PRES_Q            = 0.20
-PRES_SMOOTH_T     = 9
-
-# Suppression
+# Suppression / usage
 USED_THRESHOLD        = 0.65
 USED_DILATE_MS        = 80
 ANCHOR_SUPPRESS_MS    = 200
 ANCHOR_SUPPRESS_BASE  = 0.6
 
+# Residual pruning per pass (frame-energy ratio)
+PRUNE_FRAME_RATIO_THR = 0.005  # 0.5%
+
 # Loop
 MAX_PASSES    = 3
-MIN_ERATIO    = 0.01
+MIN_ERATIO    = 0.01  # stop if ER < 1%
 
 # =========================
 # Utils
@@ -98,10 +111,6 @@ def align_len_1d(x: torch.Tensor, T: int, device=None, mode="linear"):
     else:
         out = F.interpolate(xv, size=T, mode=mode, align_corners=False).view(-1)
     return out.clamp(0,1)
-
-def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 0.0) -> torch.Tensor:
-    sig = torch.sigmoid(slope * (x - center))
-    return min_val + (1.0 - min_val) * sig
 
 # =========================
 # IO & Spectra
@@ -170,41 +179,55 @@ def anchor_score(A_t: torch.Tensor, Pur: torch.Tensor) -> torch.Tensor:
 
 def pick_anchor_region(score: torch.Tensor, La: int, core_pct: float) -> Tuple[int, int, int, int]:
     """
-    Finds the highest score peak, creates an anchor around it, and then finds
-    the core region within that anchor, also centered on the peak.
-    Returns: (anchor_start, anchor_end, core_start_relative, core_end_relative)
+    Peak-first anchor & core inside anchor (quantile-based expansion).
+    Returns: (anchor_start, anchor_end, core_s_rel, core_e_rel)
     """
     T = score.numel()
-
-    # 1. Find the index of the absolute highest score.
     peak_idx = int(torch.argmax(score).item())
-
-    # 2. Calculate the anchor window centered on the peak.
     anchor_s = max(0, min(peak_idx - (La // 2), T - La))
     anchor_e = anchor_s + La
 
-    # 3. Define the local score window within the anchor.
     local_score = score[anchor_s:anchor_e]
-    
-    # 4. Find the peak's index relative to the start of the anchor.
     peak_idx_rel = int(torch.argmax(local_score).item())
 
-    # 5. Define the threshold for expanding the core.
     threshold = torch.quantile(local_score, core_pct)
 
-    # 6. Expand left and right from the relative peak to define the core.
     core_s_rel = peak_idx_rel
     while core_s_rel > 0 and local_score[core_s_rel - 1] >= threshold:
         core_s_rel -= 1
-        
+
     core_e_rel = peak_idx_rel
     while core_e_rel < La - 1 and local_score[core_e_rel + 1] >= threshold:
         core_e_rel += 1
-    
-    # End index is exclusive, so add 1
-    core_e_rel += 1
 
+    core_e_rel += 1  # end-exclusive
     return anchor_s, anchor_e, core_s_rel, core_e_rel
+
+def select_anchor_with_energy(score: torch.Tensor, La: int, core_pct: float,
+                              P: torch.Tensor, max_tries: int = 5):
+    """
+    Try top peaks up to max_tries. Reject if anchor energy ratio <= 0.5%.
+    Returns: (s,e,core_s_rel,core_e_rel, energy_ratio) or None if not found.
+    """
+    Sc = score.clone()
+    T = score.numel()
+    tried = 0
+    for _ in range(max_tries):
+        s, e, core_s_rel, core_e_rel = pick_anchor_region(Sc, La, core_pct)
+        E_anchor = P[:, s:e].sum()
+        E_total  = P.sum()
+        ratio = float((E_anchor / (E_total + EPS)).item())
+        if ratio > 0.005:
+            return s, e, core_s_rel, core_e_rel, ratio
+        # suppress this candidate region and try next
+        peak_idx = int(torch.argmax(Sc).item())
+        sup_s = max(0, peak_idx - La)
+        sup_e = min(T, peak_idx + La)
+        Sc[sup_s:sup_e] = 0.0
+        tried += 1
+        if Sc.max() <= 0 or tried >= max_tries:
+            break
+    return None
 
 # =========================
 # Ω & Template
@@ -232,36 +255,73 @@ def template_from_anchor_block(Ablk: torch.Tensor, omega: torch.Tensor) -> torch
     return w
 
 # =========================
-# Presence gate & cosΩ
+# Time similarity & freq mapping
 # =========================
-def presence_from_energy(Xmel: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-    om = omega.view(-1,1)
-    e_omega = (Xmel * om).sum(dim=0)
-    e_omega = smooth1d(e_omega, PRES_SMOOTH_T)
-    thr = torch.quantile(e_omega, PRES_Q)
-    thr = torch.clamp(thr, min=1e-10)
-    return (e_omega > thr).float()
-
-def amplitude_raw(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-    om = omega.view(-1,1)
-    Xo = Xmel * om
-    denom = (w_bar*w_bar).sum() + EPS
-    a_raw = (w_bar.view(1,-1) @ Xo).view(-1) / denom
-    return a_raw.clamp_min(0.0)
-
-def cos_similarity_over_omega(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, g_pres: torch.Tensor):
+def cos_similarity_over_omega_no_gate(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
     om = omega.view(-1,1)
     Xo = Xmel * om
     wn = (w_bar * omega); wn = wn / (wn.norm(p=2) + 1e-8)
     Xn = Xo / (Xo.norm(p=2, dim=0, keepdim=True) + 1e-8)
     cos_raw = (wn.view(-1,1) * Xn).sum(dim=0).clamp(0,1)
-    return cos_raw * g_pres
+    return cos_raw
+
+def omega_linear_continuous(mel_fb_m2f: torch.Tensor, omega: torch.Tensor, gamma_f: float = 0.9) -> torch.Tensor:
+    """
+    Continuous mapping from mel support (omega) to linear freq weights q in [0,1],
+    with light smoothing along frequency.
+    mel_fb_m2f: [M,F], omega: [M]
+    """
+    M, Freq = mel_fb_m2f.shape
+    om = omega / (omega.sum() + EPS)
+    q = (mel_fb_m2f.T @ om).view(-1)  # [F]
+    q = (q / (q.max() + EPS)).clamp(0,1)
+    if gamma_f != 1.0:
+        q = q.pow(gamma_f)
+    # light smoothing (3-bin)
+    q = F.avg_pool1d(q.view(1,1,-1), kernel_size=3, stride=1, padding=1).view(-1).clamp(0,1)
+    return q
 
 # =========================
-# Debug (Linear Amplitude Visualization)
+# Leaky + Saturating gate
 # =========================
-def debug_plot(pass_idx:int, score:torch.Tensor, a_raw:torch.Tensor,
-               cos_t:torch.Tensor, C_t:torch.Tensor,
+def leaky_saturating_gate(cos_t: torch.Tensor, tau: float,
+                          band_low: float, band_high: float,
+                          leak_at_tau: float) -> torch.Tensor:
+    """
+    Band-limited, leaky-ReLU-like gate with top saturation.
+
+    cos <= tau - band_low          -> 0
+    tau - band_low < cos < tau     -> 0 -> leak_at_tau  (linear)
+    tau <= cos < tau + band_high   -> leak_at_tau -> 1  (linear)
+    cos >= tau + band_high         -> 1  (saturate)
+
+    Output in [0,1], continuous/connected at boundaries.
+    """
+    x   = cos_t.clamp(0, 1)
+    lo  = tau - band_low
+    mid = tau
+    hi  = tau + band_high
+
+    below    = (x <= lo).float()
+    mid_low  = ((x > lo) & (x < mid)).float()
+    mid_high = ((x >= mid) & (x < hi)).float()
+    above    = (x >= hi).float()
+
+    # lo..mid : 0 -> leak
+    u_low  = ((x - lo) / (mid - lo + 1e-8)).clamp(0, 1)
+    g_low  = u_low * leak_at_tau
+
+    # mid..hi : leak -> 1
+    u_high = ((x - mid) / (hi - mid + 1e-8)).clamp(0, 1)
+    g_high = leak_at_tau + (1.0 - leak_at_tau) * u_high
+
+    gate = below * 0.0 + mid_low * g_low + mid_high * g_high + above * 1.0
+    return gate.clamp(0, 1)
+
+# =========================
+# Debug
+# =========================
+def debug_plot(pass_idx:int, score:torch.Tensor, cos_t:torch.Tensor, time_weight:torch.Tensor,
                P:torch.Tensor, M_lin:torch.Tensor,
                s:int, e:int, core_s_rel:int, core_e_rel:int,
                out_png:str, title:str):
@@ -277,15 +337,13 @@ def debug_plot(pass_idx:int, score:torch.Tensor, a_raw:torch.Tensor,
     ax[0,0].legend(); ax[0,0].set_title("Anchor score"); ax[0,0].set_ylim([0,1.05])
 
     # 2) Scalars
-    ar = to_np(a_raw); ar_n = (ar - ar.min())/(ar.max()-ar.min()+1e-8)
-    ax[0,1].plot(t, ar_n, label='a_raw (norm)', lw=1.0)
     ax[0,1].plot(t, to_np(cos_t), label='cosΩ', lw=1.0)
-    ax[0,1].plot(t, to_np(C_t), label='C(t) [Debug]', lw=1.0, alpha=0.85)
+    ax[0,1].plot(t, to_np(time_weight), label='time weight (leaky+saturating)', lw=1.0, alpha=0.85)
     ax[0,1].legend(); ax[0,1].set_ylim([0,1.05]); ax[0,1].set_title("Scalars")
 
     # 3) Mask stats
     m_mean = to_np(M_lin.mean(dim=0))
-    ax[0,2].plot(t, m_mean, color='purple'); ax[0,2].set_ylim([0,1.05])
+    ax[0,2].plot(t, m_mean); ax[0,2].set_ylim([0,1.05])
     ax[0,2].set_title("Mask frame-mean")
 
     # 4-6) Spectrograms (Linear Amplitude)
@@ -313,7 +371,7 @@ def debug_plot(pass_idx:int, score:torch.Tensor, a_raw:torch.Tensor,
     print(f"  📊 Debug saved: {out_png}")
 
 # =========================
-# Single Pass (Final Version: Sigmoid Mask on cosΩ)
+# Single Pass (Leaky+Saturating Cosine Gate)
 # =========================
 def single_pass(audio: np.ndarray, extractor, ast_model,
                 mel_fb_m2f: torch.Tensor,
@@ -339,7 +397,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         um = (F.conv1d(um.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1) > 0.2).float()
         Sc = Sc * (1 - 0.85 * um)
 
-    # Enhanced suppression of previous anchors
+    # Enhance suppression of previous anchors
     for (sa, ea, prev_w, prev_omega) in prev_anchors:
         ca = int(((sa+ea)/2) * SR / HOP)
         ca = max(0, min(T-1, ca))
@@ -348,76 +406,96 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         Sc = Sc * (1 - ANCHOR_SUPPRESS_BASE * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
         core_s = max(0, ca - La//2); core_e = min(T, ca + La//2)
         Sc[core_s:core_e] *= 0.2
-    
-    # Pick anchor and core regions, centered on the peak score
-    s, e, core_s_rel, core_e_rel = pick_anchor_region(Sc, La, TOP_PCT_CORE_IN_ANCHOR)
-    
-    # Create anchor block (Ablk) based on the core indices
+
+    # Select anchor with energy validation (>= 0.5%)
+    sel = select_anchor_with_energy(Sc, La, TOP_PCT_CORE_IN_ANCHOR, P, max_tries=5)
+    if sel is None:
+        info = {"stopped": True, "reason":"no-valid-anchor(<0.5% energy)", "elapsed": time.time()-t0}
+        return None, None, 0.0, None, info
+    s, e, core_s_rel, core_e_rel, anchor_ratio = sel
+
+    # Construct anchor block (core only)
     Ablk = Xmel[:, s:e].clone()
     if core_s_rel > 0:  Ablk[:, :core_s_rel] = 0
-    if core_e_rel < La: Ablk[:, core_e_rel:] = 0
+    if core_e_rel < (e - s): Ablk[:, core_e_rel:] = 0
 
     # Ω & template
     omega = omega_support(Ablk)
     w_bar = template_from_anchor_block(Ablk, omega)
-    
-    # Calculate cosΩ, the core of our mask
-    g_pres = presence_from_energy(Xmel, omega)
-    cos_t_raw = cos_similarity_over_omega(Xmel, w_bar, omega, g_pres)
 
-    # Map Ω(mel)->Ω(linear) for frequency weighting
-    omega_lin = ((mel_fb_m2f.T @ omega).clamp_min(0.0) > 1e-12).float()
+    # Cosine similarity over Ω
+    cos_t_raw = cos_similarity_over_omega_no_gate(Xmel, w_bar, omega)   # [T] in [0,1]
 
-    # === Final Masking Logic: Sigmoid function on cosΩ ===
-    soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * (cos_t_raw - MASK_SIGMOID_CENTER))
-    M_lin = omega_lin.view(-1, 1) * soft_time_mask.view(1, -1)
-    
-    # Subtraction in the complex STFT domain for precision
+    # Leaky + Saturating time gate around tau
+    gate = leaky_saturating_gate(
+        cos_t_raw,
+        tau=TIME_TAU,
+        band_low=TIME_BAND_LOW,
+        band_high=TIME_BAND_HIGH,
+        leak_at_tau=TIME_LEAK_AT_TAU
+    )  # [T] in [0,1]
+
+    # Final time weight: high-similarity region (cos >= tau+band_high) => gate=1 => equals cos
+    time_weight = cos_t_raw * gate if TIME_USE_COS_WEIGHTED else gate   # [T]
+
+    # Mel->linear continuous frequency weights
+    q_lin = omega_linear_continuous(mel_fb_m2f, omega, gamma_f=0.9)     # [F]
+    M_lin = q_lin.view(-1,1) * time_weight.view(1,-1)                   # [F,T]
+
+    # Subtraction in complex STFT domain
     stft_full = st
     stft_src  = M_lin * stft_full
     stft_res  = stft_full - stft_src
 
-    # Reconstruct both source and residual from their respective spectrograms
+    # Residual pruning per pass: zero frames with tiny energy ratio (<=0.5%)
+    Pres = (stft_res.abs()**2).clamp_min(EPS)
+    e_frame = Pres.sum(dim=0)                    # [T]
+    e_tot   = e_frame.sum()
+    r_frame = e_frame / (e_tot + EPS)
+    low = (r_frame <= PRUNE_FRAME_RATIO_THR)
+    if bool(low.any()):
+        stft_res[:, low] = 0.0 + 0.0j
+
+    # Reconstruct source and residual
     src_amp = torch.istft(stft_src, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
-    res = torch.istft(stft_res, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
+    res     = torch.istft(stft_res, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
 
     # ER calculation
     e_src = float(np.sum(src_amp**2)); e_res = float(np.sum(res**2))
     er = e_src / (e_src + e_res + 1e-12)
 
     # Used-frame mask for next pass
-    r_t = (M_lin * P).sum(dim=0) / (P.sum(dim=0) + 1e-8)
-    used_mask = (r_t >= USED_THRESHOLD).float()
+    P_lin = P
+    r_t_used = (M_lin * P_lin).sum(dim=0) / (P_lin.sum(dim=0) + 1e-8)
+    used_mask = (r_t_used >= USED_THRESHOLD).float()
 
     elapsed = time.time() - t0
-    
+
     if out_dir:
-        # Calculate C(t) purely for visualization purposes
-        a_raw = amplitude_raw(Xmel, w_bar, omega)
-        a_nz_soft = soft_sigmoid(a_raw / (a_raw.median() + 1e-8), center=0.1, slope=10.0, min_val=0.0)
-        C_t = cos_t_raw * a_nz_soft
         png = os.path.join(out_dir, f"debug_pass_{pass_idx+1}.png")
-        debug_plot(pass_idx, Sc, a_raw, cos_t_raw, C_t, P, M_lin,
+        debug_plot(pass_idx, Sc, cos_t_raw, time_weight, P, M_lin,
                    s, e, core_s_rel, core_e_rel, png,
-                   title=f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s | ER={er*100:.1f}% [Sigmoid Mask]")
+                   title=(f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s "
+                          f"(r={anchor_ratio*100:.2f}%) | ER={er*100:.1f}%"))
 
     info = {
         "er": er,
         "elapsed": elapsed,
         "anchor": (s*HOP/SR, e*HOP/SR),
         "core":   ((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR),
-        "quality": float(soft_time_mask.mean().item()),
+        "quality": float(time_weight.mean().item()),
         "w_bar": w_bar,
         "omega": omega,
+        "anchor_ratio": anchor_ratio,
         "stopped": False
     }
     return src_amp, res, er, used_mask, info
 
 # =========================
-# Main (Final Version)
+# Main
 # =========================
 def main():
-    ap=argparse.ArgumentParser(description="Final AST-guided Source Separator")
+    ap=argparse.ArgumentParser(description="AST-guided Source Separator (Leaky+Saturating Cosine Gate)")
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--passes", type=int, default=MAX_PASSES)
@@ -427,9 +505,10 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     audio0 = load_fixed_audio(args.input)
-    print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Final Version)\n{'='*64}")
+    print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Leaky+Saturating Cosine Gate)\n{'='*64}")
     print(f"Input: fixed {WIN_SEC:.3f}s, Anchor: {ANCHOR_SEC:.3f}s, Passes: {args.passes}")
-    print(f"Features: Sigmoid Masking, Peak-first Selection, Normalization, Clipping")
+    print(f"Gate: tau={TIME_TAU}, band_low={TIME_BAND_LOW}, band_high={TIME_BAND_HIGH}, leak@tau={TIME_LEAK_AT_TAU}, cos-weighted={TIME_USE_COS_WEIGHTED}")
+    print(f"Anchor≥0.5% energy, continuous Ω→linear, residual frame pruning≤0.5%.")
 
     # Mel FB: [F,M] -> [M,F]
     fbins = N_FFT//2 + 1
@@ -459,27 +538,26 @@ def main():
             used_mask_prev, prev_anchors,
             pass_idx=i, out_dir=None if args.no_debug else args.output
         )
-        
+
         if result[0] is None:
             info = result[4]
             reason = info.get("reason", "stopped")
             print(f"  ⏹️ Stopped: {reason}")
             break
-        
+
         src, res, er, used_mask_prev, info = result
         print(f"⏱️ pass{i+1}: {info['elapsed']:.3f}s | anchor {info['anchor'][0]:.2f}-{info['anchor'][1]:.2f}s"
-              f" | core {info['core'][0]:.2f}-{info['core'][1]:.2f}s | ER={er*100:.1f}%")
+              f" | core {info['core'][0]:.2f}-{info['core'][1]:.2f}s | ER={er*100:.1f}% | anchor_r={info['anchor_ratio']*100:.2f}%")
 
         if er < MIN_ERATIO:
             print("  ⚠️ Too little energy; stopping.")
             break
 
-        # Peak Normalization for clear output
+        # Peak Normalization
         peak = np.max(np.abs(src))
         if peak > 1e-8:
             gain = NORMALIZE_TARGET_PEAK / peak
-            src = src * gain
-            src = np.clip(src, -1.0, 1.0)
+            src = np.clip(src * gain, -1.0, 1.0)
 
         out_src = os.path.join(args.output, f"{i+1:02d}_source.wav")
         torchaudio.save(out_src, torch.from_numpy(src).unsqueeze(0), SR)
@@ -489,11 +567,11 @@ def main():
         prev_anchors.append((info["anchor"][0], info["anchor"][1], info["w_bar"], info["omega"]))
         saved += 1
 
-    # Apply Hard Clipping to the final residual
+    # Final residual amplitude clipping
     if RESIDUAL_CLIP_THR > 0:
         print(f"\nApplying residual clipping with threshold: {RESIDUAL_CLIP_THR}")
         cur[np.abs(cur) < RESIDUAL_CLIP_THR] = 0.0
-    
+
     out_res = os.path.join(args.output, "00_residual.wav")
     torchaudio.save(out_res, torch.from_numpy(cur).unsqueeze(0), SR)
 

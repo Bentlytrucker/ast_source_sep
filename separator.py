@@ -55,7 +55,7 @@ W_E           = 0.30
 TOP_PCT_CORE_IN_ANCHOR  = 0.50
 
 # Ω & template
-OMEGA_Q           = 0.70
+OMEGA_Q           = 0.40
 OMEGA_DIL         = 2
 OMEGA_MIN_BINS    = 10
 

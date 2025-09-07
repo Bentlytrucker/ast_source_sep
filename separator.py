@@ -57,7 +57,7 @@ TOP_PCT_CORE_IN_ANCHOR  = 0.50
 # Ω & template
 OMEGA_Q           = 0.40
 OMEGA_DIL         = 2
-OMEGA_MIN_BINS    = 10
+OMEGA_MIN_BINS    = 5
 
 # Presence gate
 PRES_Q            = 0.20
@@ -103,6 +103,10 @@ def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 
     sig = torch.sigmoid(slope * (x - center))
     return min_val + (1.0 - min_val) * sig
 
+
+
+
+
 # =========================
 # IO & Spectra
 # =========================
@@ -139,22 +143,37 @@ def stft_all(audio: np.ndarray, mel_fb_m2f: torch.Tensor):
 # Attention & Purity
 # =========================
 @torch.no_grad()
-def ast_attention_time(audio: np.ndarray, extractor, ast_model, T_out: int) -> torch.Tensor:
+def ast_attention_time(audio: np.ndarray, extractor, ast_model, T_out: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns:
+        - time_attn: [T_out] (smoothed, normalized time attention)
+        - full_map: [12, Tp] (raw attention map, freq x time)
+    """
     feat = extractor(audio, sampling_rate=SR, return_tensors="pt")
     out  = ast_model(input_values=feat["input_values"], output_attentions=True, return_dict=True)
     attns = out.attentions
     if not attns or len(attns)==0:
-        return torch.ones(T_out)*0.5
+        return torch.ones(T_out)*0.5, torch.ones(12, 101)*0.5
+    
+    # 마지막 레이어의 어텐션 맵 추출
     A = attns[-1]
-    cls = A[:, :, 0, 1:].mean(dim=1).squeeze(0)
+    cls = A[:, :, 0, 1:].mean(dim=1).squeeze(0)  # [12*Tp]
     Fp = 12
     Np = cls.numel()
     Tp = Np // Fp
-    if Tp < 2: return torch.ones(T_out)*0.5
-    grid = cls[:Fp*Tp].reshape(Fp, Tp).mean(dim=0)
+    if Tp < 2:
+        return torch.ones(T_out)*0.5, torch.ones(12, Tp)*0.5
+    
+    # 주파수-시간 어텐션 맵 생성
+    full_map = cls[:Fp*Tp].reshape(Fp, Tp)  # [12, Tp]
+    
+    # 시간 어텐션 계산
+    grid = full_map.mean(dim=0)  # [Tp]
     grid = norm01(grid)
     A_t  = F.interpolate(grid.view(1,1,-1), size=T_out, mode="linear", align_corners=False).view(-1)
-    return norm01(smooth1d(A_t, SMOOTH_T))
+    time_attn = norm01(smooth1d(A_t, SMOOTH_T))
+    
+    return time_attn, full_map
 
 def purity_from_P(P: torch.Tensor) -> torch.Tensor:
     fbins, T = P.shape
@@ -209,18 +228,52 @@ def pick_anchor_region(score: torch.Tensor, La: int, core_pct: float) -> Tuple[i
 # =========================
 # Ω & Template
 # =========================
-def omega_support(Ablk: torch.Tensor) -> torch.Tensor:
+def omega_support(Ablk: torch.Tensor, full_map: torch.Tensor, s: int, e: int) -> torch.Tensor:
+    """
+    앵커 블록에서 주파수 지원 영역 Ω 생성
+    어텐션 맵의 활성화된 주파수 영역을 포함
+    """
+    # 기존 주파수 마스크 계산
     med = Ablk.median(dim=1).values
-    th  = torch.quantile(med, OMEGA_Q)
+    th = torch.quantile(med, OMEGA_Q)
     mask = (med >= th).float()
+
+    _, attn_T = full_map.shape
+    s_norm = int((s / Ablk.shape[1]) * attn_T)
+    e_norm = int((e / Ablk.shape[1]) * attn_T)
+    s_norm = min(max(0, s_norm), attn_T-1)
+    e_norm = min(max(s_norm+1, e_norm), attn_T)
+
+    # 어텐션 맵에서 앵커 구간의 주파수 활성화 정도 계산
+    attn_freq = full_map[:, s_norm:e_norm].mean(dim=1) # [12]
+    
+    # 멜 스케일로 보간 (12 -> N_MELS)
+    attn_freq = F.interpolate(
+        attn_freq.view(1,1,-1), 
+        size=Ablk.shape[0], 
+        mode="linear", 
+        align_corners=False
+    ).view(-1)
+    
+    # 어텐션 상위 30% 주파수 선택
+    attn_th = torch.quantile(attn_freq, 0.0)
+    attn_mask = (attn_freq >= attn_th).float()
+    
+    # 기존 마스크와 어텐션 마스크 결합
+    mask = torch.maximum(mask, attn_mask)
+    
+    # 주파수 연속성을 위한 확장
     for _ in range(OMEGA_DIL):
         mask = torch.maximum(mask, torch.roll(mask, 1))
         mask = torch.maximum(mask, torch.roll(mask, -1))
+    
+    # 최소 주파수 영역 확보
     if int(mask.sum().item()) < OMEGA_MIN_BINS:
         order = torch.argsort(med, descending=True)
         need = OMEGA_MIN_BINS - int(mask.sum().item())
         take = order[:need]
         mask[take] = 1.0
+    
     return mask
 
 def template_from_anchor_block(Ablk: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
@@ -327,7 +380,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     La = int(round(ANCHOR_SEC * SR / HOP))
 
     # Anchor score
-    A_t  = ast_attention_time(audio, extractor, ast_model, T)
+    A_t, full_map = ast_attention_time(audio, extractor, ast_model, T)
     Pur  = purity_from_P(P)
     Sc   = anchor_score(A_t, Pur)
 
@@ -358,7 +411,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     if core_e_rel < La: Ablk[:, core_e_rel:] = 0
 
     # Ω & template
-    omega = omega_support(Ablk)
+    omega = omega_support(Ablk, full_map, s, e)
     w_bar = template_from_anchor_block(Ablk, omega)
     
     # Calculate cosΩ, the core of our mask
@@ -371,6 +424,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     # === Final Masking Logic: Sigmoid function on cosΩ ===
     soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * (cos_t_raw - MASK_SIGMOID_CENTER))
     M_lin = omega_lin.view(-1, 1) * soft_time_mask.view(1, -1)
+    
     
     # Subtraction in the complex STFT domain for precision
     stft_full = st

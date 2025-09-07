@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AST-guided Source Separator — Leaky+Saturating Cosine Gate (Full)
+AST-guided Source Separator — Hard Time Threshold + Short Padding, Sigmoid Ω (Full)
 
-What this version does:
-- Time selection/weighting is purely cosine-similarity-driven with a leaky + saturating gate:
-  * cos <= tau - band_low         -> gate = 0   (hard off, no leak)
-  * tau - band_low < cos < tau    -> gate rises 0 -> leak_at_tau (small leak)
-  * tau <= cos < tau + band_high  -> gate rises leak_at_tau -> 1 (fast ramp)
-  * cos >= tau + band_high        -> gate = 1   (saturated)
-  -> time_weight = cos * gate  (so high-similarity regions follow cos exactly)
-- No presence gate, no a_raw gate, no sigmoid smoothstep shaping elsewhere.
-- Anchor selection with energy validation (>= 0.5% of total).
-- Continuous mel->linear frequency weights (not binary).
-- Complex-domain subtraction, per-pass residual pruning (<= 0.5% per-frame energy), peak-normalized sources.
-
-Inputs/Outputs:
-- Fixed 4.096 s mono input (resampled to 16 kHz if needed), multiple passes (default 3).
-- Saves per-pass extracted sources and final residual.
+What this version does (per your spec):
+- Time selection is HARD by cosine threshold (tau=0.6), then we add a short
+  temporal padding (2–3 frames) to relax edge choppiness:
+      b(t) = 1[cosΩ(t) >= tau]
+      time_weight(t) = dilation(b, K)   # K frames (10ms hop ⇒ ~K*10ms)
+- Frequency selection uses a CONTINUOUS (sigmoid) Ω on mel bins instead of binary Ω.
+  This reduces horizontal striping / mid-band holes when projected to linear freq:
+      omega_soft(m) = σ(slope * (med_norm(m) - center_quantile))
+- Separation is complex-domain masking; residual per-frame tiny energy pruning; peak-normalized sources.
 
 Dependencies: torch, torchaudio, transformers, matplotlib, numpy
 """
@@ -42,16 +36,13 @@ WIN_SEC           = 4.096
 ANCHOR_SEC        = 0.512
 L_FIXED           = int(round(WIN_SEC * SR))
 
-# === Final Output Processing ===
+# === Output Processing ===
 NORMALIZE_TARGET_PEAK = 0.95
 RESIDUAL_CLIP_THR     = 0.0005
 
-# === Cosine→Leaky + Saturating time gate ===
-TIME_TAU          = 0.60   # center threshold
-TIME_BAND_LOW     = 0.05   # (tau - band_low, tau): 0 -> leak_at_tau
-TIME_BAND_HIGH    = 0.04   # (tau, tau + band_high): leak_at_tau -> 1; >= tau+band_high => 1
-TIME_LEAK_AT_TAU  = 0.10   # gate value exactly at tau (small leak)
-TIME_USE_COS_WEIGHTED = True  # True => time_weight = cos * gate (recommended)
+# === Time mask: hard cosine threshold + short padding ===
+TIME_TAU      = 0.7   # hard threshold on cosΩ(t)
+TIME_PAD_K    = 3      # +/-K frames dilation (10ms hop ⇒ ~30ms). Use 2~3 as discussed.
 
 # STFT (10ms hop)
 N_FFT, HOP, WINLEN = 400, 160, 400
@@ -68,10 +59,10 @@ BETA_PUR      = 1.20
 W_E           = 0.30
 TOP_PCT_CORE_IN_ANCHOR  = 0.50
 
-# Ω & template
-OMEGA_Q           = 0.70
-OMEGA_DIL         = 2
-OMEGA_MIN_BINS    = 10
+# Ω & template (SOFT Ω settings)
+OMEGA_Q           = 0.70     # center via quantile on median-normalized mel
+OMEGA_SIG_SLOPE   = 10.0     # sigmoid slope (7~12 recommended)
+OMEGA_MIN_BINS    = 10       # safety floor for coverage
 
 # Suppression / usage
 USED_THRESHOLD        = 0.65
@@ -84,7 +75,7 @@ PRUNE_FRAME_RATIO_THR = 0.005  # 0.5%
 
 # Loop
 MAX_PASSES    = 3
-MIN_ERATIO    = 0.01  # stop if ER < 1%
+MIN_ERATIO    = 0.005  # stop if ER < 1%
 
 # =========================
 # Utils
@@ -219,7 +210,7 @@ def select_anchor_with_energy(score: torch.Tensor, La: int, core_pct: float,
         ratio = float((E_anchor / (E_total + EPS)).item())
         if ratio > 0.005:
             return s, e, core_s_rel, core_e_rel, ratio
-        # suppress this candidate region and try next
+        # suppress this region and try next
         peak_idx = int(torch.argmax(Sc).item())
         sup_s = max(0, peak_idx - La)
         sup_e = min(T, peak_idx + La)
@@ -232,26 +223,39 @@ def select_anchor_with_energy(score: torch.Tensor, La: int, core_pct: float,
 # =========================
 # Ω & Template
 # =========================
-def omega_support(Ablk: torch.Tensor) -> torch.Tensor:
-    med = Ablk.median(dim=1).values
-    th  = torch.quantile(med, OMEGA_Q)
-    mask = (med >= th).float()
-    for _ in range(OMEGA_DIL):
-        mask = torch.maximum(mask, torch.roll(mask, 1))
-        mask = torch.maximum(mask, torch.roll(mask, -1))
-    if int(mask.sum().item()) < OMEGA_MIN_BINS:
-        order = torch.argsort(med, descending=True)
-        need = OMEGA_MIN_BINS - int(mask.sum().item())
-        take = order[:need]
-        mask[take] = 1.0
-    return mask
+def omega_support_soft(Ablk: torch.Tensor) -> torch.Tensor:
+    """
+    Continuous Ω(m) ∈ [0,1] using a sigmoid over normalized median energy per mel bin.
+    - Normalize mel medians to [0,1]
+    - Center at the OMEGA_Q quantile
+    - Apply sigmoid with slope OMEGA_SIG_SLOPE
+    - Light smoothing
+    Ensures at least OMEGA_MIN_BINS have noticeable weight by gentle re-scaling.
+    """
+    med  = Ablk.median(dim=1).values           # [M]
+    if float(med.max().item()) <= 1e-12:
+        return torch.zeros_like(med)
+    medn = (med - med.min()) / (med.max() - med.min() + 1e-8)
+    c    = torch.quantile(medn, OMEGA_Q)
+    omega_soft = torch.sigmoid(OMEGA_SIG_SLOPE * (medn - c))  # (0,1)
+    # light smoothing (3-bin)
+    omega_soft = F.avg_pool1d(omega_soft.view(1,1,-1), kernel_size=3, stride=1, padding=1).view(-1)
+    # ensure some coverage
+    if int((omega_soft > 0.01).sum().item()) < OMEGA_MIN_BINS:
+        order = torch.argsort(medn, descending=True)
+        take = order[:OMEGA_MIN_BINS]
+        omega_soft[take] = torch.maximum(omega_soft[take], torch.tensor(0.5, device=omega_soft.device))
+    return omega_soft.clamp(0,1)
 
 def template_from_anchor_block(Ablk: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
     om = omega.view(-1,1)
-    w  = (Ablk * om).mean(dim=1) * omega
-    w  = w / (w.sum() + EPS)
+    w  = (Ablk * om).mean(dim=1)
+    w  = (w * omega)
+    s  = w.sum() + EPS
+    w  = w / s
     w_sm = F.avg_pool1d(w.view(1,1,-1), kernel_size=3, stride=1, padding=1).view(-1)
-    w   = (w_sm * omega); w = w / (w.sum() + EPS)
+    w   = (w_sm * omega)
+    w   = w / (w.sum() + EPS)
     return w
 
 # =========================
@@ -267,56 +271,35 @@ def cos_similarity_over_omega_no_gate(Xmel: torch.Tensor, w_bar: torch.Tensor, o
 
 def omega_linear_continuous(mel_fb_m2f: torch.Tensor, omega: torch.Tensor, gamma_f: float = 0.9) -> torch.Tensor:
     """
-    Continuous mapping from mel support (omega) to linear freq weights q in [0,1],
+    Continuous mapping from mel weights (omega in [0,1]) to linear freq weights q in [0,1],
     with light smoothing along frequency.
     mel_fb_m2f: [M,F], omega: [M]
     """
     M, Freq = mel_fb_m2f.shape
+    if float(omega.sum().item()) <= 1e-12:
+        return torch.zeros(Freq, device=mel_fb_m2f.device, dtype=mel_fb_m2f.dtype)
     om = omega / (omega.sum() + EPS)
     q = (mel_fb_m2f.T @ om).view(-1)  # [F]
     q = (q / (q.max() + EPS)).clamp(0,1)
     if gamma_f != 1.0:
         q = q.pow(gamma_f)
-    # light smoothing (3-bin)
-    q = F.avg_pool1d(q.view(1,1,-1), kernel_size=3, stride=1, padding=1).view(-1).clamp(0,1)
+    # light smoothing (5-bin for slightly smoother profile)
+    q = F.avg_pool1d(q.view(1,1,-1), kernel_size=5, stride=1, padding=2).view(-1).clamp(0,1)
     return q
 
 # =========================
-# Leaky + Saturating gate
+# Time mask: hard threshold + padding
 # =========================
-def leaky_saturating_gate(cos_t: torch.Tensor, tau: float,
-                          band_low: float, band_high: float,
-                          leak_at_tau: float) -> torch.Tensor:
+def hard_mask_with_padding(cos_t: torch.Tensor, tau: float, pad_k: int) -> torch.Tensor:
     """
-    Band-limited, leaky-ReLU-like gate with top saturation.
-
-    cos <= tau - band_low          -> 0
-    tau - band_low < cos < tau     -> 0 -> leak_at_tau  (linear)
-    tau <= cos < tau + band_high   -> leak_at_tau -> 1  (linear)
-    cos >= tau + band_high         -> 1  (saturate)
-
-    Output in [0,1], continuous/connected at boundaries.
+    Build a HARD binary mask by tau, then apply temporal dilation using max-pool over +/- pad_k frames.
+    Returns time_weight in [0,1] (binary except at boundaries determined by padding).
     """
-    x   = cos_t.clamp(0, 1)
-    lo  = tau - band_low
-    mid = tau
-    hi  = tau + band_high
-
-    below    = (x <= lo).float()
-    mid_low  = ((x > lo) & (x < mid)).float()
-    mid_high = ((x >= mid) & (x < hi)).float()
-    above    = (x >= hi).float()
-
-    # lo..mid : 0 -> leak
-    u_low  = ((x - lo) / (mid - lo + 1e-8)).clamp(0, 1)
-    g_low  = u_low * leak_at_tau
-
-    # mid..hi : leak -> 1
-    u_high = ((x - mid) / (hi - mid + 1e-8)).clamp(0, 1)
-    g_high = leak_at_tau + (1.0 - leak_at_tau) * u_high
-
-    gate = below * 0.0 + mid_low * g_low + mid_high * g_high + above * 1.0
-    return gate.clamp(0, 1)
+    b = (cos_t >= tau).float()                  # [T] hard 0/1
+    if pad_k <= 0 or b.numel() == 0:
+        return b
+    m = F.max_pool1d(b.view(1,1,-1), kernel_size=2*pad_k+1, stride=1, padding=pad_k).view(-1)
+    return m.clamp(0,1)
 
 # =========================
 # Debug
@@ -338,7 +321,7 @@ def debug_plot(pass_idx:int, score:torch.Tensor, cos_t:torch.Tensor, time_weight
 
     # 2) Scalars
     ax[0,1].plot(t, to_np(cos_t), label='cosΩ', lw=1.0)
-    ax[0,1].plot(t, to_np(time_weight), label='time weight (leaky+saturating)', lw=1.0, alpha=0.85)
+    ax[0,1].plot(t, to_np(time_weight), label=f'time weight (hard τ={TIME_TAU}+pad K={TIME_PAD_K})', lw=1.0, alpha=0.85)
     ax[0,1].legend(); ax[0,1].set_ylim([0,1.05]); ax[0,1].set_title("Scalars")
 
     # 3) Mask stats
@@ -371,7 +354,7 @@ def debug_plot(pass_idx:int, score:torch.Tensor, cos_t:torch.Tensor, time_weight
     print(f"  📊 Debug saved: {out_png}")
 
 # =========================
-# Single Pass (Leaky+Saturating Cosine Gate)
+# Single Pass (Hard mask + padding, Soft Ω)
 # =========================
 def single_pass(audio: np.ndarray, extractor, ast_model,
                 mel_fb_m2f: torch.Tensor,
@@ -389,7 +372,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     Pur  = purity_from_P(P)
     Sc   = anchor_score(A_t, Pur)
 
-    # Suppress used frames
+    # Suppress used frames (from previous pass hard usage)
     if used_mask_prev is not None:
         um = align_len_1d(used_mask_prev, T, device=Sc.device, mode="linear")
         k = int(round((USED_DILATE_MS/1000.0)*SR/HOP)); k = ensure_odd(max(1,k))
@@ -419,24 +402,15 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     if core_s_rel > 0:  Ablk[:, :core_s_rel] = 0
     if core_e_rel < (e - s): Ablk[:, core_e_rel:] = 0
 
-    # Ω & template
-    omega = omega_support(Ablk)
-    w_bar = template_from_anchor_block(Ablk, omega)
+    # Ω (soft sigmoid) & template
+    omega = omega_support_soft(Ablk)                 # [M] continuous in [0,1]
+    w_bar = template_from_anchor_block(Ablk, omega)  # [M]
 
     # Cosine similarity over Ω
     cos_t_raw = cos_similarity_over_omega_no_gate(Xmel, w_bar, omega)   # [T] in [0,1]
 
-    # Leaky + Saturating time gate around tau
-    gate = leaky_saturating_gate(
-        cos_t_raw,
-        tau=TIME_TAU,
-        band_low=TIME_BAND_LOW,
-        band_high=TIME_BAND_HIGH,
-        leak_at_tau=TIME_LEAK_AT_TAU
-    )  # [T] in [0,1]
-
-    # Final time weight: high-similarity region (cos >= tau+band_high) => gate=1 => equals cos
-    time_weight = cos_t_raw * gate if TIME_USE_COS_WEIGHTED else gate   # [T]
+    # HARD mask + temporal padding (dilation)
+    time_weight = hard_mask_with_padding(cos_t_raw, tau=TIME_TAU, pad_k=TIME_PAD_K)  # [T] in {0,1}
 
     # Mel->linear continuous frequency weights
     q_lin = omega_linear_continuous(mel_fb_m2f, omega, gamma_f=0.9)     # [F]
@@ -464,9 +438,9 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     e_src = float(np.sum(src_amp**2)); e_res = float(np.sum(res**2))
     er = e_src / (e_src + e_res + 1e-12)
 
-    # Used-frame mask for next pass
-    P_lin = P
-    r_t_used = (M_lin * P_lin).sum(dim=0) / (P_lin.sum(dim=0) + 1e-8)
+    # Used-frame mask for next pass (use HARD support b(t) to avoid over-suppression)
+    b_hard = (cos_t_raw >= TIME_TAU).float()
+    r_t_used = (q_lin.view(-1,1) * b_hard.view(1,-1) * P).sum(dim=0) / (P.sum(dim=0) + 1e-8)
     used_mask = (r_t_used >= USED_THRESHOLD).float()
 
     elapsed = time.time() - t0
@@ -476,7 +450,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         debug_plot(pass_idx, Sc, cos_t_raw, time_weight, P, M_lin,
                    s, e, core_s_rel, core_e_rel, png,
                    title=(f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s "
-                          f"(r={anchor_ratio*100:.2f}%) | ER={er*100:.1f}%"))
+                          f"(r={anchor_ratio*100:.2f}%) | ER={er*100:.1f}% | τ={TIME_TAU}, padK={TIME_PAD_K}"))
 
     info = {
         "er": er,
@@ -495,19 +469,33 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
 # Main
 # =========================
 def main():
-    ap=argparse.ArgumentParser(description="AST-guided Source Separator (Leaky+Saturating Cosine Gate)")
+    # <-- FIX: declare globals BEFORE any use inside main()
+    global TIME_TAU, TIME_PAD_K, OMEGA_SIG_SLOPE, OMEGA_Q
+
+    ap=argparse.ArgumentParser(description="AST-guided Source Separator (Hard Threshold + Padding, Soft Ω)")
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--passes", type=int, default=MAX_PASSES)
     ap.add_argument("--no-debug", action="store_true")
+    ap.add_argument("--tau", type=float, default=TIME_TAU, help="Cosine hard threshold (default 0.6)")
+    ap.add_argument("--pad-k", type=int, default=TIME_PAD_K, help="Temporal padding (±K frames), default 3")
+    ap.add_argument("--omega-slope", type=float, default=OMEGA_SIG_SLOPE, help="Sigmoid Ω slope (default 10.0)")
+    ap.add_argument("--omega-q", type=float, default=OMEGA_Q, help="Sigmoid Ω center quantile (default 0.70)")
     args=ap.parse_args()
+
+    # apply CLI overrides to globals
+    TIME_TAU = float(args.tau)
+    TIME_PAD_K = max(0, int(args.pad_k))
+    OMEGA_SIG_SLOPE = float(args.omega_slope)
+    OMEGA_Q = float(args.omega_q)
 
     os.makedirs(args.output, exist_ok=True)
 
     audio0 = load_fixed_audio(args.input)
-    print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Leaky+Saturating Cosine Gate)\n{'='*64}")
+    print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Hard Threshold + Padding, Soft Ω)\n{'='*64}")
     print(f"Input: fixed {WIN_SEC:.3f}s, Anchor: {ANCHOR_SEC:.3f}s, Passes: {args.passes}")
-    print(f"Gate: tau={TIME_TAU}, band_low={TIME_BAND_LOW}, band_high={TIME_BAND_HIGH}, leak@tau={TIME_LEAK_AT_TAU}, cos-weighted={TIME_USE_COS_WEIGHTED}")
+    print(f"Time: hard τ={TIME_TAU}, padding ±K={TIME_PAD_K} frames (~{TIME_PAD_K*HOP/SR*1000:.0f} ms)")
+    print(f"Ω: sigmoid with slope={OMEGA_SIG_SLOPE}, center quantile={OMEGA_Q}, min bins={OMEGA_MIN_BINS}")
     print(f"Anchor≥0.5% energy, continuous Ω→linear, residual frame pruning≤0.5%.")
 
     # Mel FB: [F,M] -> [M,F]

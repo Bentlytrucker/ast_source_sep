@@ -31,6 +31,9 @@ torch.set_num_threads(4)
 # =========================
 # Config
 # =========================
+# Frequency-guided padding strength
+FREQ_GUIDE_GAMMA = 1.2  # 1.0~1.5 권장; 클수록 cosΩ 높은 프레임만 강하게 살림
+
 SR                = 16000
 WIN_SEC           = 4.096
 ANCHOR_SEC        = 0.512
@@ -290,16 +293,54 @@ def omega_linear_continuous(mel_fb_m2f: torch.Tensor, omega: torch.Tensor, gamma
 # =========================
 # Time mask: hard threshold + padding
 # =========================
-def hard_mask_with_padding(cos_t: torch.Tensor, tau: float, pad_k: int) -> torch.Tensor:
+def freq_guided_edge_fade(cos_t: torch.Tensor, tau: float, K: int, gamma: float = 1.2) -> torch.Tensor:
     """
-    Build a HARD binary mask by tau, then apply temporal dilation using max-pool over +/- pad_k frames.
-    Returns time_weight in [0,1] (binary except at boundaries determined by padding).
+    Hard 시간 마스크(b) + 엣지 페이드(half-cosine)를 적용하되,
+    페이드 구간의 크기를 cosΩ(t)^gamma 로 스케일하는 '주파수-가이드' 버전.
+    시드(=b==1) 내부는 그대로 1 유지, 경계 패딩 프레임만 연속값으로 완충.
     """
-    b = (cos_t >= tau).float()                  # [T] hard 0/1
-    if pad_k <= 0 or b.numel() == 0:
+    T = cos_t.numel()
+    b = (cos_t >= tau).float()
+    if K <= 0 or T == 0:
         return b
-    m = F.max_pool1d(b.view(1,1,-1), kernel_size=2*pad_k+1, stride=1, padding=pad_k).view(-1)
+
+    # 기본은 시드 유지
+    m = b.clone()
+
+    # half-cosine 램프
+    t = torch.arange(0, K+1, device=cos_t.device, dtype=cos_t.dtype)
+    fade_in_full  = 0.5 - 0.5*torch.cos(torch.pi * (t / K))  # 0..1
+    fade_out_full = 0.5 + 0.5*torch.cos(torch.pi * (t / K))  # 1..0
+
+    # 엣지 검출
+    d = torch.zeros_like(b)
+    d[1:] = b[1:] - b[:-1]
+    rising  = (d > 0).nonzero(as_tuple=False).view(-1)         # 0->1 발생 지점 t0 (첫 1의 인덱스)
+    falling0 = (d < 0).nonzero(as_tuple=False).view(-1)        # 1->0 직후의 0 인덱스
+    falling = (falling0 - 1).clamp(min=0)                      # 마지막 1의 인덱스 t1
+
+    pow_cos = cos_t.clamp(0,1).pow(gamma)                      # 주파수 유사도 기반 가이드
+
+    # Rising edge: ... 0 0 [패딩] 1 |
+    for t0 in rising.tolist():
+        start = max(0, t0 - K)
+        L = t0 - start + 1
+        fade = fade_in_full[-L:]                                # 0->1 램프 tail 정렬
+        guide = pow_cos[start:t0+1]                             # 각 프레임의 cosΩ^γ
+        cand = fade * guide                                     # 가이드된 페이드
+        m[start:t0+1] = torch.maximum(m[start:t0+1], cand)
+
+    # Falling edge: | 1 [패딩] 0 0 ...
+    for t1 in falling.tolist():
+        end = min(T-1, t1 + K)
+        L = end - t1 + 1
+        fade = fade_out_full[:L]                                # 1->0 램프 head 정렬
+        guide = pow_cos[t1:end+1]
+        cand = fade * guide
+        m[t1:end+1] = torch.maximum(m[t1:end+1], cand)
+
     return m.clamp(0,1)
+
 
 # =========================
 # Debug
@@ -410,7 +451,8 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     cos_t_raw = cos_similarity_over_omega_no_gate(Xmel, w_bar, omega)   # [T] in [0,1]
 
     # HARD mask + temporal padding (dilation)
-    time_weight = hard_mask_with_padding(cos_t_raw, tau=TIME_TAU, pad_k=TIME_PAD_K)  # [T] in {0,1}
+    time_weight = freq_guided_edge_fade(cos_t_raw, tau=TIME_TAU, K=TIME_PAD_K, gamma=FREQ_GUIDE_GAMMA)
+
 
     # Mel->linear continuous frequency weights
     q_lin = omega_linear_continuous(mel_fb_m2f, omega, gamma_f=0.9)     # [F]

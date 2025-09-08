@@ -64,6 +64,11 @@ OMEGA_MIN_BINS    = 5
 # AST Frequency Attention
 AST_FREQ_QUANTILE = 0.4  # AST 주파수 어텐션 상위 30% 사용
 
+# Sound Type Classification
+DANGER_IDS = {396, 397, 398, 399, 400, 426, 436}
+HELP_IDS = {23, 14, 354, 355, 356, 359}
+WARNING_IDS = {288, 364, 388, 389, 390, 439, 391, 392, 393, 395, 440, 441, 443, 456, 469, 470, 478, 479}
+
 # Presence gate
 PRES_Q            = 0.20
 PRES_SMOOTH_T     = 9
@@ -107,6 +112,60 @@ def align_len_1d(x: torch.Tensor, T: int, device=None, mode="linear"):
 def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 0.0) -> torch.Tensor:
     sig = torch.sigmoid(slope * (x - center))
     return min_val + (1.0 - min_val) * sig
+
+def get_sound_type(class_id: int) -> str:
+    """클래스 ID를 기반으로 소리 타입 반환"""
+    if class_id in DANGER_IDS:
+        return "danger"
+    elif class_id in HELP_IDS:
+        return "help"
+    elif class_id in WARNING_IDS:
+        return "warning"
+    else:
+        return "other"
+
+def calculate_decibel(audio: np.ndarray) -> Tuple[float, float, float]:
+    """오디오의 데시벨 계산 (min, max, 평균)"""
+    # RMS 계산
+    rms = np.sqrt(np.mean(audio**2))
+    if rms == 0:
+        return -np.inf, -np.inf, -np.inf
+    
+    # 데시벨 변환 (20 * log10(rms))
+    db = 20 * np.log10(rms + 1e-10)
+    
+    # min, max, 평균 계산
+    db_min = 20 * np.log10(np.min(np.abs(audio)) + 1e-10)
+    db_max = 20 * np.log10(np.max(np.abs(audio)) + 1e-10)
+    db_mean = db
+    
+    return db_min, db_max, db_mean
+
+@torch.no_grad()
+def classify_audio_segment(audio: np.ndarray, extractor, ast_model) -> Tuple[str, str, int, float]:
+    """오디오 세그먼트를 분류하여 클래스명, 타입, ID, 신뢰도 반환"""
+    # 10초로 패딩
+    target_len = int(10.0 * SR)
+    if len(audio) < target_len:
+        audio_padded = np.zeros(target_len, dtype=np.float32)
+        audio_padded[:len(audio)] = audio
+    else:
+        audio_padded = audio[:target_len]
+    
+    # AST 모델로 분류
+    feat = extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
+    outputs = ast_model(input_values=feat["input_values"])
+    
+    # Top-1 클래스 추출 및 신뢰도 계산
+    logits = outputs.logits
+    probabilities = torch.softmax(logits, dim=-1)
+    predicted_class_id = logits.argmax(dim=-1).item()
+    confidence = probabilities[0, predicted_class_id].item()
+    
+    class_name = ast_model.config.id2label[predicted_class_id]
+    sound_type = get_sound_type(predicted_class_id)
+    
+    return class_name, sound_type, predicted_class_id, confidence
 
 # =========================
 # IO & Spectra
@@ -508,8 +567,9 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         print(f"  ⚠️ WARNING: Energy not conserved! Total/Orig={energy_ratio:.3f}")
         # 에너지 정규화
         scale_factor = orig_energy / (total_energy + 1e-8)
-        stft_src = stft_src * torch.sqrt(scale_factor)
-        stft_res = stft_res * torch.sqrt(scale_factor)
+        scale_tensor = torch.tensor(scale_factor, device=stft_src.device, dtype=stft_src.dtype)
+        stft_src = stft_src * torch.sqrt(scale_tensor)
+        stft_res = stft_res * torch.sqrt(scale_tensor)
         print(f"  🔧 Scaled energies by factor {scale_factor:.3f}")
 
     # Reconstruct both source and residual from their respective spectrograms
@@ -536,6 +596,12 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
                    s, e, core_s_rel, core_e_rel, ast_freq_attn, png,
                    title=f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s | ER={er*100:.1f}% [Enhanced Mask]")
 
+    # AST 모델로 분류
+    class_name, sound_type, class_id, confidence = classify_audio_segment(src_amp, extractor, ast_model)
+    
+    # 데시벨 계산
+    db_min, db_max, db_mean = calculate_decibel(src_amp)
+    
     info = {
         "er": er,
         "elapsed": elapsed,
@@ -544,7 +610,14 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         "quality": float(soft_time_mask.mean().item()),
         "w_bar": w_bar,
         "omega": omega,
-        "stopped": False
+        "stopped": False,
+        "class_name": class_name,
+        "sound_type": sound_type,
+        "class_id": class_id,
+        "confidence": confidence,
+        "db_min": db_min,
+        "db_max": db_max,
+        "db_mean": db_mean
     }
     return src_amp, res, er, used_mask, info
 
@@ -602,8 +675,18 @@ def main():
             break
         
         src, res, er, used_mask_prev, info = result
+        
+        # 분류 정보 출력
+        class_name = info['class_name']
+        sound_type = info['sound_type']
+        class_id = info['class_id']
+        confidence = info['confidence']
+        db_min, db_max, db_mean = info['db_min'], info['db_max'], info['db_mean']
+        
         print(f"⏱️ pass{i+1}: {info['elapsed']:.3f}s | anchor {info['anchor'][0]:.2f}-{info['anchor'][1]:.2f}s"
               f" | core {info['core'][0]:.2f}-{info['core'][1]:.2f}s | ER={er*100:.1f}%")
+        print(f"  🎵 Class: {class_name} (ID: {class_id}) | Type: {sound_type} | Confidence: {confidence:.3f}")
+        print(f"  🔊 Decibel: min={db_min:.1f}dB, max={db_max:.1f}dB, mean={db_mean:.1f}dB")
 
         if er < MIN_ERATIO:
             print("  ⚠️ Too little energy; stopping.")
@@ -616,7 +699,10 @@ def main():
             src = src * gain
             src = np.clip(src, -1.0, 1.0)
 
-        out_src = os.path.join(args.output, f"{i+1:02d}_source.wav")
+        # 클래스명을 포함한 파일명 생성
+        safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_class_name = safe_class_name.replace(' ', '_')
+        out_src = os.path.join(args.output, f"{i+1:02d}_{safe_class_name}_{sound_type}.wav")
         torchaudio.save(out_src, torch.from_numpy(src).unsqueeze(0), SR)
         print(f"    ✅ Saved (Normalized): {out_src}")
 
@@ -629,7 +715,24 @@ def main():
         print(f"\nApplying residual clipping with threshold: {RESIDUAL_CLIP_THR}")
         cur[np.abs(cur) < RESIDUAL_CLIP_THR] = 0.0
     
-    out_res = os.path.join(args.output, "00_residual.wav")
+    # Residual 분류
+    print(f"\n🔍 Classifying residual audio...")
+    res_class_name, res_sound_type, res_class_id, res_confidence = classify_audio_segment(cur, extractor, ast_model)
+    res_db_min, res_db_max, res_db_mean = calculate_decibel(cur)
+    
+    print(f"  🎵 Residual Class: {res_class_name} (ID: {res_class_id}) | Type: {res_sound_type} | Confidence: {res_confidence:.3f}")
+    print(f"  🔊 Residual Decibel: min={res_db_min:.1f}dB, max={res_db_max:.1f}dB, mean={res_db_mean:.1f}dB")
+    
+    # 신뢰도에 따른 파일명 결정
+    if res_confidence >= 0.6:
+        safe_res_class_name = "".join(c for c in res_class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_res_class_name = safe_res_class_name.replace(' ', '_')
+        out_res = os.path.join(args.output, f"00_{safe_res_class_name}_{res_sound_type}.wav")
+        print(f"  ✅ High confidence ({res_confidence:.3f}), using class name")
+    else:
+        out_res = os.path.join(args.output, "00_residual.wav")
+        print(f"  ⚠️ Low confidence ({res_confidence:.3f}), using 'residual' name")
+    
     torchaudio.save(out_res, torch.from_numpy(cur).unsqueeze(0), SR)
 
     total_elapsed = time.time() - total_t0

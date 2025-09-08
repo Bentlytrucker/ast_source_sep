@@ -86,7 +86,7 @@ ANCHOR_SUPPRESS_BASE  = 0.6
 
 # Loop
 MAX_PASSES    = 3
-MIN_ERATIO    = 0.01
+MIN_ERATIO    = 0.001
 
 # Hard time-threshold (요청사항)
 TIME_SIM_THRESHOLD = 0.6

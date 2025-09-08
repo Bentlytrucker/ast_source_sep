@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Final Version: AST-guided Source Separator
+Final Version: AST-guided Source Separator with Enhanced Frequency Attention
 Features:
-- Sigmoid Soft Masking based purely on Cosine Similarity.
+- Sigmoid Soft Masking based on squared Cosine Similarity.
 - Peak-first anchor and core selection for stability.
+- AST Frequency Attention integration with selective weighting.
+- Top 20% amplitude frequencies + AST active frequencies boosting.
 - Frequency-domain subtraction for precision.
 - Peak Normalization for consistent output volume.
 - Residual Clipping for a clean residual file.
-- Linear Amplitude visualization for intuitive analysis.
+- Linear Amplitude visualization with AST frequency attention.
 """
 
 import os, time, warnings, argparse
@@ -55,9 +57,12 @@ W_E           = 0.30
 TOP_PCT_CORE_IN_ANCHOR  = 0.50
 
 # Ω & template
-OMEGA_Q           = 0.40
+OMEGA_Q           = 0.2
 OMEGA_DIL         = 2
 OMEGA_MIN_BINS    = 5
+
+# AST Frequency Attention
+AST_FREQ_QUANTILE = 0.4  # AST 주파수 어텐션 상위 30% 사용
 
 # Presence gate
 PRES_Q            = 0.20
@@ -103,10 +108,6 @@ def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 
     sig = torch.sigmoid(slope * (x - center))
     return min_val + (1.0 - min_val) * sig
 
-
-
-
-
 # =========================
 # IO & Spectra
 # =========================
@@ -140,41 +141,71 @@ def stft_all(audio: np.ndarray, mel_fb_m2f: torch.Tensor):
     return st, mag, P, phase, mel_pow
 
 # =========================
-# Attention & Purity
+# AST Attention (Time & Frequency)
 # =========================
 @torch.no_grad()
-def ast_attention_time(audio: np.ndarray, extractor, ast_model, T_out: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def ast_attention_freq_time(audio: np.ndarray, extractor, ast_model, T_out: int, F_out: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Returns:
-        - time_attn: [T_out] (smoothed, normalized time attention)
-        - full_map: [12, Tp] (raw attention map, freq x time)
+    AST 어텐션에서 시간과 주파수 정보를 모두 추출
+    Returns: (time_attention, freq_attention)
     """
-    feat = extractor(audio, sampling_rate=SR, return_tensors="pt")
-    out  = ast_model(input_values=feat["input_values"], output_attentions=True, return_dict=True)
+    # 10초로 패딩
+    target_len = int(10.0 * SR)
+    if len(audio) < target_len:
+        audio_padded = np.zeros(target_len, dtype=np.float32)
+        audio_padded[:len(audio)] = audio
+    else:
+        audio_padded = audio[:target_len]
+    
+    feat = extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
+    out = ast_model(input_values=feat["input_values"], output_attentions=True, return_dict=True)
     attns = out.attentions
-    if not attns or len(attns)==0:
-        return torch.ones(T_out)*0.5, torch.ones(12, 101)*0.5
     
-    # 마지막 레이어의 어텐션 맵 추출
-    A = attns[-1]
-    cls = A[:, :, 0, 1:].mean(dim=1).squeeze(0)  # [12*Tp]
-    Fp = 12
-    Np = cls.numel()
-    Tp = Np // Fp
-    if Tp < 2:
-        return torch.ones(T_out)*0.5, torch.ones(12, Tp)*0.5
+    if not attns or len(attns) == 0:
+        return torch.ones(T_out) * 0.5, torch.ones(F_out) * 0.5
     
-    # 주파수-시간 어텐션 맵 생성
-    full_map = cls[:Fp*Tp].reshape(Fp, Tp)  # [12, Tp]
+    # 마지막 레이어의 어텐션 사용
+    A = attns[-1]  # [batch, heads, seq, seq]
     
-    # 시간 어텐션 계산
-    grid = full_map.mean(dim=0)  # [Tp]
-    grid = norm01(grid)
-    A_t  = F.interpolate(grid.view(1,1,-1), size=T_out, mode="linear", align_corners=False).view(-1)
-    time_attn = norm01(smooth1d(A_t, SMOOTH_T))
+    # CLS 토큰(0번)에서 패치들(2번부터)로의 어텐션
+    cls_to_patches = A[0, :, 0, 2:].mean(dim=0)  # 헤드들 평균
     
-    return time_attn, full_map
+    # AST는 12(freq) x 101(time) 패치 구조
+    Fp, Tp = 12, 101
+    expected_len = Fp * Tp
+    
+    if cls_to_patches.numel() != expected_len:
+        actual_len = cls_to_patches.numel()
+        if actual_len < expected_len:
+            cls_to_patches = F.pad(cls_to_patches, (0, expected_len - actual_len))
+        else:
+            cls_to_patches = cls_to_patches[:expected_len]
+    
+    # 2D 맵으로 재구성
+    full_map = cls_to_patches.reshape(Fp, Tp)  # [12, 101]
+    
+    # 시간 어텐션 (주파수 차원으로 평균)
+    time_attn = full_map.mean(dim=0)  # [101]
+    time_attn_interp = F.interpolate(time_attn.view(1,1,-1), size=T_out, mode="linear", align_corners=False).view(-1)
+    time_attn_smooth = smooth1d(time_attn_interp, SMOOTH_T)
+    time_attn_norm = norm01(time_attn_smooth)
+    
+    # 주파수 어텐션 (시간 차원으로 평균)
+    freq_attn = full_map.mean(dim=1)  # [12]
+    freq_attn_interp = F.interpolate(freq_attn.view(1,1,-1), size=F_out, mode="linear", align_corners=False).view(-1)
+    freq_attn_norm = norm01(freq_attn_interp)
+    
+    return time_attn_norm, freq_attn_norm
 
+@torch.no_grad()
+def ast_attention_time(audio: np.ndarray, extractor, ast_model, T_out: int) -> torch.Tensor:
+    """기존 호환성을 위한 함수"""
+    time_attn, _ = ast_attention_freq_time(audio, extractor, ast_model, T_out, N_MELS)
+    return time_attn
+
+# =========================
+# Attention & Purity
+# =========================
 def purity_from_P(P: torch.Tensor) -> torch.Tensor:
     fbins, T = P.shape
     e = P.sum(dim=0); e_n = e / (e.max() + EPS)
@@ -226,48 +257,30 @@ def pick_anchor_region(score: torch.Tensor, La: int, core_pct: float) -> Tuple[i
     return anchor_s, anchor_e, core_s_rel, core_e_rel
 
 # =========================
-# Ω & Template
+# Ω & Template (with AST Frequency Attention)
 # =========================
-def omega_support(Ablk: torch.Tensor, full_map: torch.Tensor, s: int, e: int) -> torch.Tensor:
+def omega_support_with_ast_freq(Ablk: torch.Tensor, ast_freq_attn: torch.Tensor) -> torch.Tensor:
     """
-    앵커 블록에서 주파수 지원 영역 Ω 생성
-    어텐션 맵의 활성화된 주파수 영역을 포함
+    AST 주파수 어텐션을 고려한 omega 지원 계산
     """
-    # 기존 주파수 마스크 계산
+    # 기존 방식으로 계산된 마스크
     med = Ablk.median(dim=1).values
     th = torch.quantile(med, OMEGA_Q)
-    mask = (med >= th).float()
-
-    _, attn_T = full_map.shape
-    s_norm = int((s / Ablk.shape[1]) * attn_T)
-    e_norm = int((e / Ablk.shape[1]) * attn_T)
-    s_norm = min(max(0, s_norm), attn_T-1)
-    e_norm = min(max(s_norm+1, e_norm), attn_T)
-
-    # 어텐션 맵에서 앵커 구간의 주파수 활성화 정도 계산
-    attn_freq = full_map[:, s_norm:e_norm].mean(dim=1) # [12]
+    mask_energy = (med >= th).float()
     
-    # 멜 스케일로 보간 (12 -> N_MELS)
-    attn_freq = F.interpolate(
-        attn_freq.view(1,1,-1), 
-        size=Ablk.shape[0], 
-        mode="linear", 
-        align_corners=False
-    ).view(-1)
+    # AST 주파수 어텐션에서 상위 주파수들 선택
+    ast_freq_th = torch.quantile(ast_freq_attn, AST_FREQ_QUANTILE)
+    mask_ast_freq = (ast_freq_attn >= ast_freq_th).float()
     
-    # 어텐션 상위 30% 주파수 선택
-    attn_th = torch.quantile(attn_freq, 0.0)
-    attn_mask = (attn_freq >= attn_th).float()
+    # 두 마스크를 결합 (OR 연산)
+    mask = torch.maximum(mask_energy, mask_ast_freq)
     
-    # 기존 마스크와 어텐션 마스크 결합
-    mask = torch.maximum(mask, attn_mask)
-    
-    # 주파수 연속성을 위한 확장
+    # 기존 팽창 연산
     for _ in range(OMEGA_DIL):
         mask = torch.maximum(mask, torch.roll(mask, 1))
         mask = torch.maximum(mask, torch.roll(mask, -1))
     
-    # 최소 주파수 영역 확보
+    # 최소 빈 수 보장
     if int(mask.sum().item()) < OMEGA_MIN_BINS:
         order = torch.argsort(med, descending=True)
         need = OMEGA_MIN_BINS - int(mask.sum().item())
@@ -311,12 +324,13 @@ def cos_similarity_over_omega(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: to
     return cos_raw * g_pres
 
 # =========================
-# Debug (Linear Amplitude Visualization)
+# Debug (Linear Amplitude Visualization with AST Frequency Attention)
 # =========================
 def debug_plot(pass_idx:int, score:torch.Tensor, a_raw:torch.Tensor,
                cos_t:torch.Tensor, C_t:torch.Tensor,
                P:torch.Tensor, M_lin:torch.Tensor,
                s:int, e:int, core_s_rel:int, core_e_rel:int,
+               ast_freq_attn:torch.Tensor,
                out_png:str, title:str):
     fbins, T = P.shape
     t = np.arange(T) * HOP / SR
@@ -336,10 +350,11 @@ def debug_plot(pass_idx:int, score:torch.Tensor, a_raw:torch.Tensor,
     ax[0,1].plot(t, to_np(C_t), label='C(t) [Debug]', lw=1.0, alpha=0.85)
     ax[0,1].legend(); ax[0,1].set_ylim([0,1.05]); ax[0,1].set_title("Scalars")
 
-    # 3) Mask stats
-    m_mean = to_np(M_lin.mean(dim=0))
-    ax[0,2].plot(t, m_mean, color='purple'); ax[0,2].set_ylim([0,1.05])
-    ax[0,2].set_title("Mask frame-mean")
+    # 3) AST Frequency Attention Map
+    freq_bins = np.arange(len(ast_freq_attn))
+    ax[0,2].bar(freq_bins, to_np(ast_freq_attn), color='orange', alpha=0.7)
+    ax[0,2].set_title("AST Freq Attention"); ax[0,2].set_ylim([0,1.05])
+    ax[0,2].set_xlabel("Mel Frequency Bins")
 
     # 4-6) Spectrograms (Linear Amplitude)
     spec_mag = P.sqrt()
@@ -366,7 +381,7 @@ def debug_plot(pass_idx:int, score:torch.Tensor, a_raw:torch.Tensor,
     print(f"  📊 Debug saved: {out_png}")
 
 # =========================
-# Single Pass (Final Version: Sigmoid Mask on cosΩ)
+# Single Pass (Final Version with Enhanced Selective Frequency Weighting)
 # =========================
 def single_pass(audio: np.ndarray, extractor, ast_model,
                 mel_fb_m2f: torch.Tensor,
@@ -379,10 +394,10 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     fbins, T = P.shape
     La = int(round(ANCHOR_SEC * SR / HOP))
 
-    # Anchor score
-    A_t, full_map = ast_attention_time(audio, extractor, ast_model, T)
-    Pur  = purity_from_P(P)
-    Sc   = anchor_score(A_t, Pur)
+    # AST에서 시간과 주파수 어텐션 모두 추출
+    A_t, ast_freq_attn = ast_attention_freq_time(audio, extractor, ast_model, T, N_MELS)
+    Pur = purity_from_P(P)
+    Sc = anchor_score(A_t, Pur)
 
     # Suppress used frames
     if used_mask_prev is not None:
@@ -410,8 +425,8 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     if core_s_rel > 0:  Ablk[:, :core_s_rel] = 0
     if core_e_rel < La: Ablk[:, core_e_rel:] = 0
 
-    # Ω & template
-    omega = omega_support(Ablk, full_map, s, e)
+    # AST 주파수 어텐션을 고려한 Ω 계산
+    omega = omega_support_with_ast_freq(Ablk, ast_freq_attn)
     w_bar = template_from_anchor_block(Ablk, omega)
     
     # Calculate cosΩ, the core of our mask
@@ -421,15 +436,81 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     # Map Ω(mel)->Ω(linear) for frequency weighting
     omega_lin = ((mel_fb_m2f.T @ omega).clamp_min(0.0) > 1e-12).float()
 
-    # === Final Masking Logic: Sigmoid function on cosΩ ===
-    soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * (cos_t_raw - MASK_SIGMOID_CENTER))
-    M_lin = omega_lin.view(-1, 1) * soft_time_mask.view(1, -1)
+    # === Enhanced Masking Logic: 코사인 유사도 제곱 + 선택적 진폭/주파수 가중 ===
+    # 1) 기본 마스크: 코사인 유사도 제곱으로 약화
+    cos_squared = cos_t_raw ** 2
+    soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * (cos_squared - MASK_SIGMOID_CENTER))
     
+    # 2) 앵커 영역의 상위 20% 진폭 주파수 선택 (Linear 도메인에서)
+    anchor_spec = P[:, s:e]  # 앵커 영역의 스펙트로그램 [fbins, La]
+    anchor_max_amp = anchor_spec.max(dim=1).values  # 각 주파수별 최대 진폭 [fbins]
+    amp_threshold = torch.quantile(anchor_max_amp, 0.8)  # 상위 20%
+    high_amp_mask_lin = (anchor_max_amp >= amp_threshold).float()  # [fbins]
+    
+    # 3) 앵커 영역에서 활성화된 AST 주파수 선택 (Mel 도메인에서 Linear로 변환)
+    anchor_ast_freq = ast_freq_attn.clone()  # [N_MELS]
+    ast_freq_threshold = torch.quantile(anchor_ast_freq, AST_FREQ_QUANTILE)
+    ast_active_mask_mel = (anchor_ast_freq >= ast_freq_threshold).float()  # [N_MELS]
+    
+    # AST 주파수 마스크를 Mel에서 Linear 도메인으로 변환
+    ast_active_mask_lin = ((mel_fb_m2f.T @ ast_active_mask_mel).clamp_min(0.0) > 0.1).float()  # [fbins]
+    
+    # 4) 선택된 주파수 영역 결합 (OR 연산으로 두 조건 중 하나라도 만족하면 가중)
+    freq_boost_mask = torch.maximum(high_amp_mask_lin, ast_active_mask_lin)  # [fbins]
+    
+    # 5) 가중치 적용 (선택된 주파수는 2배, 나머지는 1배)
+    freq_weight = 1.0 + freq_boost_mask  # [1.0, 2.0] 범위, [fbins]
+    
+    # 6) 기본 마스크 계산
+    M_base = omega_lin.view(-1, 1) * soft_time_mask.view(1, -1)  # [fbins, T]
+    
+    # 7) 주파수 가중치 적용하여 선택된 영역의 진폭 추출량 증가
+    M_weighted = M_base * freq_weight.view(-1, 1)  # [fbins, T]
+    
+    # 8) 마스크가 실제 스펙트로그램보다 크지 않도록 제한
+    spec_magnitude = P.sqrt()  # 선형 진폭 [fbins, T]
+    M_lin = torch.minimum(M_weighted, spec_magnitude)  # [fbins, T]
+    
+    # 9) 마스크가 원본을 절대 넘지 않도록 추가 보장
+    M_lin = torch.minimum(M_lin, spec_magnitude)
+    
+    # 마스크가 원본을 넘는지 최종 검증
+    overflow_count = (M_lin > spec_magnitude).sum().item()
+    if overflow_count > 0:
+        print(f"  ⚠️ WARNING: {overflow_count} points where mask > spec! Forcing correction...")
+        M_lin = torch.minimum(M_lin, spec_magnitude)
     
     # Subtraction in the complex STFT domain for precision
     stft_full = st
-    stft_src  = M_lin * stft_full
-    stft_res  = stft_full - stft_src
+    
+    # 마스크를 진폭에만 적용하고 위상은 그대로 유지
+    mag_masked = M_lin * mag  # 진폭에 마스크 적용
+    stft_src = mag_masked * torch.exp(1j * phase)  # 복소수 STFT 재구성
+    
+    # 잔여물 계산: 진폭 기반으로 올바르게 계산 (에너지 보존)
+    # 잔여물 진폭 = 원본 진폭 - 소스 진폭 (0 이하로는 가지 않음)
+    mag_residual = torch.maximum(mag - mag_masked, torch.zeros_like(mag))
+    stft_res = mag_residual * torch.exp(1j * phase)  # 잔여물 복소수 STFT 재구성
+    
+    # 디버깅: 뺄셈 결과 검증
+    src_energy = torch.sum(torch.abs(stft_src)**2).item()
+    res_energy = torch.sum(torch.abs(stft_res)**2).item()
+    orig_energy = torch.sum(torch.abs(stft_full)**2).item()
+    total_energy = src_energy + res_energy
+    
+    print(f"  🔍 Energy: Original={orig_energy:.6f}, Source={src_energy:.6f}, Residual={res_energy:.6f}")
+    print(f"  🔍 Energy ratio: Src/Orig={src_energy/(orig_energy+1e-8):.3f}, Res/Orig={res_energy/(orig_energy+1e-8):.3f}")
+    print(f"  🔍 Energy conservation: Total/Orig={total_energy/(orig_energy+1e-8):.3f}")
+    
+    # 에너지 보존 검증 (총합이 원본과 비슷해야 함)
+    energy_ratio = total_energy / (orig_energy + 1e-8)
+    if energy_ratio > 1.1:  # 총 에너지가 원본의 110%를 넘으면
+        print(f"  ⚠️ WARNING: Energy not conserved! Total/Orig={energy_ratio:.3f}")
+        # 에너지 정규화
+        scale_factor = orig_energy / (total_energy + 1e-8)
+        stft_src = stft_src * torch.sqrt(scale_factor)
+        stft_res = stft_res * torch.sqrt(scale_factor)
+        print(f"  🔧 Scaled energies by factor {scale_factor:.3f}")
 
     # Reconstruct both source and residual from their respective spectrograms
     src_amp = torch.istft(stft_src, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
@@ -452,8 +533,8 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         C_t = cos_t_raw * a_nz_soft
         png = os.path.join(out_dir, f"debug_pass_{pass_idx+1}.png")
         debug_plot(pass_idx, Sc, a_raw, cos_t_raw, C_t, P, M_lin,
-                   s, e, core_s_rel, core_e_rel, png,
-                   title=f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s | ER={er*100:.1f}% [Sigmoid Mask]")
+                   s, e, core_s_rel, core_e_rel, ast_freq_attn, png,
+                   title=f"Pass {pass_idx+1} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s | ER={er*100:.1f}% [Enhanced Mask]")
 
     info = {
         "er": er,
@@ -471,7 +552,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
 # Main (Final Version)
 # =========================
 def main():
-    ap=argparse.ArgumentParser(description="Final AST-guided Source Separator")
+    ap=argparse.ArgumentParser(description="Final AST-guided Source Separator with Enhanced Frequency Attention")
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--passes", type=int, default=MAX_PASSES)
@@ -481,9 +562,9 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     audio0 = load_fixed_audio(args.input)
-    print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Final Version)\n{'='*64}")
+    print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Enhanced Frequency Attention)\n{'='*64}")
     print(f"Input: fixed {WIN_SEC:.3f}s, Anchor: {ANCHOR_SEC:.3f}s, Passes: {args.passes}")
-    print(f"Features: Sigmoid Masking, Peak-first Selection, Normalization, Clipping")
+    print(f"Features: Enhanced Masking, Top 20% Amplitude + AST Freq Selection, Peak Normalization")
 
     # Mel FB: [F,M] -> [M,F]
     fbins = N_FFT//2 + 1

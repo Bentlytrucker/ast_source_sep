@@ -115,7 +115,7 @@ def get_sound_type(class_id: int) -> str:
         return "warning"
     else:
         # 서버가 "other"를 허용하지 않으므로 기본값을 "warning"으로 설정
-        return "warning"
+        return "other"
 
 def calculate_decibel(audio: np.ndarray) -> Tuple[float, float, float]:
     rms = np.sqrt(np.mean(audio**2))
@@ -837,16 +837,20 @@ def main():
         src_path = os.path.join(args.output, f"{pass_idx:02d}_separated.wav")
         torchaudio.save(src_path, torch.from_numpy(src_amp).unsqueeze(0), SR)
         
-        # 백엔드 전송 (비동기적으로 처리하여 지연 시간 최소화)
-        try:
-            success = send_to_backend(
-                info["sound_type"], 
-                info["class_name"], 
-                info["db_mean"]
-            )
-        except Exception as e:
-            print(f"⚠️  Backend send failed: {e}")
-            success = False
+        # 백엔드 전송 (other 타입은 제외)
+        if info["sound_type"] != "other":
+            try:
+                success = send_to_backend(
+                    info["sound_type"], 
+                    info["class_name"], 
+                    info["db_mean"]
+                )
+            except Exception as e:
+                print(f"⚠️  Backend send failed: {e}")
+                success = False
+        else:
+            print(f"⏭️  Skipping backend send for 'other' type: {info['class_name']}")
+            success = True  # other 타입은 성공으로 처리
         
         # 정보 출력
         print(f"  Separated: {info['class_name']} ({info['sound_type']})")

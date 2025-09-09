@@ -287,8 +287,9 @@ class SoundSeparator:
             return False
     
     def _load_fixed_audio(self, path: str) -> np.ndarray:
-        """오디오 파일 로드 및 고정 길이로 조정"""
+        """오디오 파일 로드 및 고정 길이로 조정 (원시 int16 값 유지)"""
         try:
+            # torchaudio로 로드 (정규화된 float 값)
             wav, sro = torchaudio.load(path)
             
             # 스테레오를 모노로 변환
@@ -299,36 +300,37 @@ class SoundSeparator:
             if sro != SR:
                 wav = torchaudio.functional.resample(wav, sro, SR)
             
-            # numpy 배열로 변환
-            wav = wav.squeeze().numpy().astype(np.float32)
+            # 정규화된 float 값을 원시 int16 값으로 변환
+            # torchaudio는 -1.0~1.0 범위로 정규화하므로, int16 범위로 복원
+            wav_int16 = (wav * 32767).squeeze().numpy().astype(np.int16)
             
             # 데이터 검증
-            if len(wav) == 0:
+            if len(wav_int16) == 0:
                 print(f"[Separator] Warning: Empty audio data from {path}")
-                return np.zeros(L_FIXED, dtype=np.float32)
+                return np.zeros(L_FIXED, dtype=np.int16)
             
             # 디버그: 오디오 데이터 범위 확인
-            print(f"[Separator] Debug: Loaded audio range: {wav.min():.3f} to {wav.max():.3f}")
-            print(f"[Separator] Debug: Loaded audio mean: {wav.mean():.3f}, std: {wav.std():.3f}")
+            print(f"[Separator] Debug: Loaded audio range: {wav_int16.min()} to {wav_int16.max()}")
+            print(f"[Separator] Debug: Loaded audio mean: {wav_int16.mean():.1f}, std: {wav_int16.std():.1f}")
             
             # 고정 길이로 조정
-            if len(wav) >= L_FIXED:
-                return wav[:L_FIXED]
+            if len(wav_int16) >= L_FIXED:
+                return wav_int16[:L_FIXED]
             else:
-                out = np.zeros(L_FIXED, dtype=np.float32)
-                out[:len(wav)] = wav
+                out = np.zeros(L_FIXED, dtype=np.int16)
+                out[:len(wav_int16)] = wav_int16
                 return out
                 
         except Exception as e:
             print(f"[Separator] Error loading audio {path}: {e}")
-            return np.zeros(L_FIXED, dtype=np.float32)
+            return np.zeros(L_FIXED, dtype=np.int16)
     
     def _classify_audio(self, audio: np.ndarray) -> Tuple[str, str, int, float]:
         """
         오디오 분류 (간단한 버전)
         
         Args:
-            audio: 오디오 데이터
+            audio: 오디오 데이터 (int16 또는 float32)
             
         Returns:
             (class_name, sound_type, class_id, confidence)
@@ -338,13 +340,19 @@ class SoundSeparator:
             return "Unknown", "other", 0, 0.5
         
         try:
+            # int16 데이터를 float32로 정규화 (AST 모델용)
+            if audio.dtype == np.int16:
+                audio_float = audio.astype(np.float32) / 32767.0  # -1.0 ~ 1.0 범위로 정규화
+            else:
+                audio_float = audio.astype(np.float32)
+            
             # 10초로 패딩
             target_len = int(10.0 * SR)
-            if len(audio) < target_len:
+            if len(audio_float) < target_len:
                 audio_padded = np.zeros(target_len, dtype=np.float32)
-                audio_padded[:len(audio)] = audio
+                audio_padded[:len(audio_float)] = audio_float
             else:
-                audio_padded = audio[:target_len]
+                audio_padded = audio_float[:target_len]
             
             feat = self.extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
             
@@ -369,7 +377,7 @@ class SoundSeparator:
         분리된 오디오를 파일로 저장
         
         Args:
-            audio: 오디오 데이터
+            audio: 오디오 데이터 (int16 또는 float32)
             class_name: 분류된 클래스 이름
             sound_type: 소리 타입
             output_dir: 저장 디렉토리
@@ -390,8 +398,14 @@ class SoundSeparator:
             filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}.wav"
             filepath = os.path.join(output_dir, filename)
             
+            # int16 데이터를 float32로 변환하여 저장
+            if audio.dtype == np.int16:
+                audio_float = audio.astype(np.float32) / 32767.0  # -1.0 ~ 1.0 범위로 정규화
+            else:
+                audio_float = audio.astype(np.float32)
+            
             # 오디오 저장
-            torchaudio.save(filepath, torch.from_numpy(audio).unsqueeze(0), SR)
+            torchaudio.save(filepath, torch.from_numpy(audio_float).unsqueeze(0), SR)
             
             print(f"[Separator] Separated audio saved: {filename}")
             return filepath

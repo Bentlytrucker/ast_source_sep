@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 FORMAT = pyaudio.paInt16
 RATE = 16000
 CHUNK = 1024
-THRESHOLD_DB = 50  # 100dB 임계값
+THRESHOLD_DB = 30  # 30dB 임계값 (테스트용)
 RECORD_SECONDS = 1.024 * 4  # 1.024 x 4초 = 4.096초
 TARGET_DEVICE_KEYWORDS = ("ReSpeaker", "seeed", "SEEED")  # 장치명에 포함될 키워드
 
@@ -128,24 +128,25 @@ class SoundTrigger:
         # RMS 계산
         rms = np.sqrt(np.mean(audio_data**2))
         
-        # 디버깅: RMS 값 확인
-        if len(audio_data) > 0:
-            print(f"Debug: audio_data range: {np.min(audio_data)} to {np.max(audio_data)}")
-            print(f"Debug: audio_data mean: {np.mean(audio_data)}")
-            print(f"Debug: audio_data std: {np.std(audio_data)}")
-            print(f"Debug: RMS: {rms}")
+        # 디버깅: RMS 값 확인 (간소화)
+        if len(audio_data) > 0 and rms > 0:
+            print(f"Debug: RMS: {rms:.2f}, dB: {20 * np.log10(rms):.1f}")
         
         if rms == 0:
             return -np.inf
         
         # dB 변환 (20 * log10(rms))
-        db = 20 * np.log10(rms + 1e-10)
-        
-        # 유효한 dB 값인지 확인
-        if np.isnan(db) or np.isinf(db):
-            return -np.inf
+        # RMS가 0이 아닌 경우에만 dB 계산
+        if rms > 0:
+            db = 20 * np.log10(rms)
             
-        return db
+            # 유효한 dB 값인지 확인
+            if np.isnan(db) or np.isinf(db):
+                return -np.inf
+                
+            return db
+        else:
+            return -np.inf
 
     def _level_for_trigger(self, interleaved: np.ndarray, num_channels: int) -> float:
         """트리거 판정 레벨(RMS 또는 abs max). 채널5가 있으면 그 채널 기준."""

@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sound Separator Module
+- separator.py 기반으로 구현
+- 각도 정보를 백엔드에 전달
+- 음원 분리 및 분류 기능
+"""
+
+import os
+import sys
+import time
+import warnings
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchaudio
+import requests
+from typing import List, Tuple, Optional, Dict, Any
+
+# separator.py에서 사용하는 모듈들 import
+warnings.filterwarnings("ignore")
+torch.set_num_threads(4)
+
+try:
+    from transformers import ASTFeatureExtractor, ASTForAudioClassification
+except ImportError:
+    print("Warning: transformers not available. Sound separation will be disabled.")
+    ASTFeatureExtractor = None
+    ASTForAudioClassification = None
+
+# =========================
+# Config (separator.py와 동일)
+# =========================
+SR = 16000
+WIN_SEC = 4.096
+ANCHOR_SEC = 0.512
+L_FIXED = int(round(WIN_SEC * SR))
+
+NORMALIZE_TARGET_PEAK = 0.95
+RESIDUAL_CLIP_THR = 0.0005
+
+USE_ADAPTIVE_STRATEGY = True
+FALLBACK_THRESHOLD = 0.1
+
+MASK_SIGMOID_CENTER = 0.6
+MASK_SIGMOID_SLOPE = 20.0
+
+N_FFT, HOP, WINLEN = 400, 160, 400
+WINDOW = torch.hann_window(WINLEN)
+EPS = 1e-10
+
+N_MELS = 128
+
+SMOOTH_T = 19
+ALPHA_ATT = 0.60
+BETA_PUR = 1.50
+W_E = 0.40
+TOP_PCT_CORE_IN_ANCHOR = 0.50
+
+OMEGA_Q_CONSERVATIVE = 0.9
+OMEGA_Q_AGGRESSIVE = 0.7
+OMEGA_DIL = 2
+OMEGA_MIN_BINS = 5
+
+AST_FREQ_QUANTILE_CONSERVATIVE = 0.7
+AST_FREQ_QUANTILE_AGGRESSIVE = 0.4
+
+DANGER_IDS = {0,396, 397, 398, 399, 400, 426, 436}
+HELP_IDS = {23, 14, 354, 355, 356, 359}
+WARNING_IDS = {288, 364, 388, 389, 390, 439, 391, 392, 393, 395, 440, 441, 443, 456, 469, 470, 478, 479}
+
+PRES_Q = 0.20
+PRES_SMOOTH_T = 9
+
+USED_THRESHOLD = 0.65
+USED_DILATE_MS = 80
+ANCHOR_SUPPRESS_MS = 200
+ANCHOR_SUPPRESS_BASE = 0.6
+
+MAX_PASSES = 3
+MIN_ERATIO = 0.01
+
+# Backend API
+USER_ID = 6
+BACKEND_URL = "http://13.238.200.232:8000/sound-events/"
+
+
+class SoundSeparator:
+    def __init__(self, model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
+                 device: str = "auto", backend_url: str = BACKEND_URL):
+        """
+        Sound Separator 초기화
+        
+        Args:
+            model_name: AST 모델 이름
+            device: 사용할 디바이스 (auto/cpu/cuda)
+            backend_url: 백엔드 API URL
+        """
+        self.model_name = model_name
+        self.backend_url = backend_url
+        
+        # Device 설정
+        if device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
+        
+        self.extractor = None
+        self.ast_model = None
+        self.mel_fb_m2f = None
+        self.is_available = False
+        
+        self._initialize_model()
+    
+    def _initialize_model(self):
+        """AST 모델 초기화"""
+        try:
+            if ASTFeatureExtractor is None or ASTForAudioClassification is None:
+                print("[Separator] Transformers not available, using mock mode")
+                self.is_available = False
+                return
+            
+            print(f"[Separator] Loading AST model: {self.model_name}")
+            print(f"[Separator] Device: {self.device}")
+            
+            self.extractor = ASTFeatureExtractor.from_pretrained(self.model_name)
+            self.ast_model = ASTForAudioClassification.from_pretrained(self.model_name).to(self.device)
+            self.ast_model.eval()
+            
+            # Mel filterbank 생성
+            self.mel_fb_m2f = torchaudio.transforms.MelScale(n_mels=N_MELS, sample_rate=SR, n_stft=N_FFT//2+1).fb
+            
+            self.is_available = True
+            print("[Separator] AST model loaded successfully")
+            
+        except Exception as e:
+            print(f"[Separator] Model loading error: {e}")
+            self.is_available = False
+    
+    def _get_sound_type(self, class_id: int) -> str:
+        """클래스 ID를 소리 타입으로 변환"""
+        if class_id in DANGER_IDS:
+            return "danger"
+        elif class_id in HELP_IDS:
+            return "help"
+        elif class_id in WARNING_IDS:
+            return "warning"
+        else:
+            return "other"
+    
+    def _calculate_decibel(self, audio: np.ndarray) -> Tuple[float, float, float]:
+        """dB 레벨 계산"""
+        rms = np.sqrt(np.mean(audio**2))
+        if rms == 0:
+            return -np.inf, -np.inf, -np.inf
+        
+        db = 20 * np.log10(rms + 1e-10)
+        db_min = 20 * np.log10(np.min(np.abs(audio)) + 1e-10)
+        db_max = 20 * np.log10(np.max(np.abs(audio)) + 1e-10)
+        db_mean = db
+        
+        return db_min, db_max, db_mean
+    
+    def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
+        """
+        백엔드로 결과 전송 (각도 정보 포함)
+        
+        Args:
+            sound_type: 소리 타입 (danger/warning/help/other)
+            sound_detail: 소리 상세 정보
+            decibel: dB 레벨
+            angle: 각도 (0-359)
+            
+        Returns:
+            전송 성공 여부
+        """
+        try:
+            data = {
+                "user_id": USER_ID,
+                "sound_type": sound_type,
+                "sound_detail": sound_detail,
+                "angle": angle,  # 각도 정보 포함
+                "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "sound_icon": "string",
+                "location_image_url": "string",
+                "decibel": float(decibel),
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'SoundPipeline/1.0'
+            }
+            
+            print(f"🔄 Sending to backend: {self.backend_url}")
+            print(f"📤 Data: {data}")
+            
+            response = requests.post(
+                self.backend_url, 
+                json=data, 
+                headers=headers,
+                timeout=3.0,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ Sent to backend: {sound_detail} ({sound_type}) at {angle}°")
+                return True
+            else:
+                print(f"❌ Backend error: {response.status_code}")
+                print(f"❌ Response: {response.text}")
+                return False
+                
+        except requests.exceptions.ConnectTimeout:
+            print(f"❌ Backend connection timeout: {self.backend_url}")
+            return False
+        except requests.exceptions.ConnectionError as e:
+            print(f"❌ Backend connection error: {e}")
+            return False
+        except requests.exceptions.Timeout:
+            print(f"❌ Backend request timeout: {self.backend_url}")
+            return False
+        except Exception as e:
+            print(f"❌ Backend error: {e}")
+            return False
+    
+    def _load_fixed_audio(self, path: str) -> np.ndarray:
+        """오디오 파일 로드 및 고정 길이로 조정"""
+        wav, sro = torchaudio.load(path)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if sro != SR:
+            wav = torchaudio.functional.resample(wav, sro, SR)
+        wav = wav.squeeze().numpy().astype(np.float32)
+        if len(wav) >= L_FIXED:
+            return wav[:L_FIXED]
+        out = np.zeros(L_FIXED, dtype=np.float32)
+        out[:len(wav)] = wav
+        return out
+    
+    def _classify_audio(self, audio: np.ndarray) -> Tuple[str, str, int, float]:
+        """
+        오디오 분류 (간단한 버전)
+        
+        Args:
+            audio: 오디오 데이터
+            
+        Returns:
+            (class_name, sound_type, class_id, confidence)
+        """
+        if not self.is_available:
+            # Mock 분류 결과
+            return "Unknown", "other", 0, 0.5
+        
+        try:
+            # 10초로 패딩
+            target_len = int(10.0 * SR)
+            if len(audio) < target_len:
+                audio_padded = np.zeros(target_len, dtype=np.float32)
+                audio_padded[:len(audio)] = audio
+            else:
+                audio_padded = audio[:target_len]
+            
+            feat = self.extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
+            
+            with torch.no_grad():
+                outputs = self.ast_model(input_values=feat["input_values"].to(self.device))
+                logits = outputs.logits
+                probabilities = torch.softmax(logits, dim=-1)
+                predicted_class_id = logits.argmax(dim=-1).item()
+                confidence = probabilities[0, predicted_class_id].item()
+            
+            class_name = self.ast_model.config.id2label[predicted_class_id]
+            sound_type = self._get_sound_type(predicted_class_id)
+            
+            return class_name, sound_type, predicted_class_id, confidence
+            
+        except Exception as e:
+            print(f"[Separator] Classification error: {e}")
+            return "Unknown", "other", 0, 0.0
+    
+    def _save_separated_audio(self, audio: np.ndarray, class_name: str, sound_type: str, output_dir: str) -> str:
+        """
+        분리된 오디오를 파일로 저장
+        
+        Args:
+            audio: 오디오 데이터
+            class_name: 분류된 클래스 이름
+            sound_type: 소리 타입
+            output_dir: 저장 디렉토리
+            
+        Returns:
+            저장된 파일 경로
+        """
+        try:
+            # 출력 디렉토리 생성
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 파일명 생성 (타임스탬프 + 클래스명 + 타입)
+            import time
+            timestamp = int(time.time())
+            safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            safe_class_name = safe_class_name.replace(' ', '_')
+            
+            filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}.wav"
+            filepath = os.path.join(output_dir, filename)
+            
+            # 오디오 저장
+            torchaudio.save(filepath, torch.from_numpy(audio).unsqueeze(0), SR)
+            
+            print(f"[Separator] Separated audio saved: {filename}")
+            return filepath
+            
+        except Exception as e:
+            print(f"[Separator] Error saving separated audio: {e}")
+            return None
+    
+    def process_audio(self, audio_file: str, angle: int, output_dir: str = None) -> Dict[str, Any]:
+        """
+        오디오 파일 처리 및 분류
+        
+        Args:
+            audio_file: 오디오 파일 경로
+            angle: 각도 (0-359)
+            output_dir: 분리된 소리 저장 디렉토리
+            
+        Returns:
+            처리 결과 딕셔너리
+        """
+        print(f"[Separator] Processing audio: {audio_file}")
+        print(f"[Separator] Angle: {angle}°")
+        
+        try:
+            # 오디오 로드
+            audio = self._load_fixed_audio(audio_file)
+            print(f"[Separator] Audio length: {len(audio)/SR:.2f}s")
+            
+            # 분류
+            class_name, sound_type, class_id, confidence = self._classify_audio(audio)
+            
+            # dB 계산
+            db_min, db_max, db_mean = self._calculate_decibel(audio)
+            
+            print(f"[Separator] Classified: {class_name} ({sound_type})")
+            print(f"[Separator] Confidence: {confidence:.3f}")
+            print(f"[Separator] Decibel: {db_mean:.1f} dB")
+            
+            # 분리된 소리 저장
+            separated_file = None
+            if output_dir:
+                separated_file = self._save_separated_audio(audio, class_name, sound_type, output_dir)
+            
+            # 백엔드 전송 (other 타입 제외)
+            backend_success = False
+            if sound_type != "other":
+                backend_success = self._send_to_backend(sound_type, class_name, db_mean, angle)
+            else:
+                print(f"[Separator] Skipping backend send for 'other' type: {class_name}")
+                backend_success = True
+            
+            # 결과 반환
+            result = {
+                "success": True,
+                "class_name": class_name,
+                "sound_type": sound_type,
+                "class_id": class_id,
+                "confidence": confidence,
+                "angle": angle,
+                "decibel": {
+                    "min": db_min,
+                    "max": db_max,
+                    "mean": db_mean
+                },
+                "backend_success": backend_success,
+                "audio_file": audio_file,
+                "separated_file": separated_file
+            }
+            
+            return result
+            
+        except Exception as e:
+            print(f"[Separator] Processing error: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "audio_file": audio_file,
+                "angle": angle
+            }
+    
+    def is_model_available(self) -> bool:
+        """모델 사용 가능 여부 확인"""
+        return self.is_available
+    
+    def cleanup(self):
+        """리소스 정리"""
+        # PyTorch 모델은 자동으로 정리됨
+        pass
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+
+
+class MockSoundSeparator:
+    """
+    모델이 없을 때 사용하는 Mock 클래스
+    테스트용으로 랜덤 분류 결과 반환
+    """
+    
+    def __init__(self, backend_url: str = BACKEND_URL):
+        self.backend_url = backend_url
+        self.is_available = False
+        print("[Separator] Mock Sound Separator initialized (no real model)")
+    
+    def process_audio(self, audio_file: str, angle: int, output_dir: str = None) -> Dict[str, Any]:
+        """Mock 처리 결과 반환"""
+        import random
+        
+        # Mock 분류 결과
+        mock_classes = [
+            ("Gunshot", "danger", 396, 0.85),
+            ("Scream", "danger", 397, 0.90),
+            ("Car horn", "warning", 288, 0.75),
+            ("Dog bark", "warning", 364, 0.80),
+            ("Help", "help", 23, 0.70),
+            ("Unknown", "other", 0, 0.50)
+        ]
+        
+        class_name, sound_type, class_id, confidence = random.choice(mock_classes)
+        
+        # Mock dB 계산
+        db_mean = random.uniform(60, 120)
+        
+        print(f"[Separator] Mock classified: {class_name} ({sound_type})")
+        print(f"[Separator] Mock confidence: {confidence:.3f}")
+        print(f"[Separator] Mock decibel: {db_mean:.1f} dB")
+        
+        # Mock 분리된 소리 저장
+        separated_file = None
+        if output_dir:
+            separated_file = self._save_separated_audio_mock(audio_file, class_name, sound_type, output_dir)
+        
+        # Mock 백엔드 전송
+        backend_success = True
+        if sound_type != "other":
+            print(f"[Separator] Mock backend send: {sound_type} at {angle}°")
+        
+        return {
+            "success": True,
+            "class_name": class_name,
+            "sound_type": sound_type,
+            "class_id": class_id,
+            "confidence": confidence,
+            "angle": angle,
+            "decibel": {
+                "min": db_mean - 10,
+                "max": db_mean + 10,
+                "mean": db_mean
+            },
+            "backend_success": backend_success,
+            "audio_file": audio_file,
+            "separated_file": separated_file
+        }
+    
+    def _save_separated_audio_mock(self, audio_file: str, class_name: str, sound_type: str, output_dir: str) -> str:
+        """Mock 분리된 오디오 저장"""
+        try:
+            import shutil
+            import time
+            
+            # 출력 디렉토리 생성
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 파일명 생성
+            timestamp = int(time.time())
+            safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            safe_class_name = safe_class_name.replace(' ', '_')
+            
+            filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}.wav"
+            filepath = os.path.join(output_dir, filename)
+            
+            # 원본 파일을 복사 (Mock)
+            shutil.copy2(audio_file, filepath)
+            
+            print(f"[Separator] Mock separated audio saved: {filename}")
+            return filepath
+            
+        except Exception as e:
+            print(f"[Separator] Mock error saving separated audio: {e}")
+            return None
+    
+    def is_model_available(self) -> bool:
+        """Mock은 항상 사용 가능"""
+        return True
+    
+    def cleanup(self):
+        """Mock 정리"""
+        pass
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+
+
+def create_sound_separator(model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
+                          device: str = "auto", backend_url: str = BACKEND_URL) -> SoundSeparator:
+    """
+    Sound Separator 인스턴스 생성
+    모델이 없으면 Mock 버전 반환
+    
+    Args:
+        model_name: AST 모델 이름
+        device: 사용할 디바이스
+        backend_url: 백엔드 API URL
+        
+    Returns:
+        SoundSeparator 또는 MockSoundSeparator 인스턴스
+    """
+    separator = SoundSeparator(model_name, device, backend_url)
+    
+    if not separator.is_model_available():
+        print("[Separator] Real model not available, using mock separator")
+        return MockSoundSeparator(backend_url)
+    
+    return separator
+
+
+def main():
+    """테스트용 메인 함수"""
+    import tempfile
+    import numpy as np
+    
+    # 테스트용 오디오 파일 생성
+    test_audio = np.random.randn(16000).astype(np.float32)  # 1초 오디오
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+        torchaudio.save(f.name, torch.from_numpy(test_audio).unsqueeze(0), SR)
+        test_file = f.name
+    
+    try:
+        with create_sound_separator() as separator:
+            print("Sound Separator 테스트 시작...")
+            
+            result = separator.process_audio(test_file, 180)
+            
+            print("처리 결과:")
+            print(f"  Success: {result['success']}")
+            if result['success']:
+                print(f"  Class: {result['class_name']}")
+                print(f"  Type: {result['sound_type']}")
+                print(f"  Confidence: {result['confidence']:.3f}")
+                print(f"  Angle: {result['angle']}°")
+                print(f"  Decibel: {result['decibel']['mean']:.1f} dB")
+                print(f"  Backend: {'✅' if result['backend_success'] else '❌'}")
+            else:
+                print(f"  Error: {result.get('error', 'Unknown error')}")
+            
+            print("Sound Separator 테스트 완료")
+    
+    finally:
+        # 테스트 파일 정리
+        if os.path.exists(test_file):
+            os.unlink(test_file)
+
+
+if __name__ == "__main__":
+    main()

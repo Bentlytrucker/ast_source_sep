@@ -162,12 +162,8 @@ class SoundTrigger:
         target_samples = int(RECORD_SECONDS * RATE)
         
         try:
-            # Monitor for a short time instead of infinite loop
-            import time
-            start_time = time.time()
-            timeout = 30  # 30 second timeout
-            
-            while time.time() - start_time < timeout:
+            # Monitor indefinitely until sound is detected
+            while True:
                 raw = self.stream.read(CHUNK, exception_on_overflow=False)
                 data_i16 = np.frombuffer(raw, dtype=np.int16)
 
@@ -212,10 +208,6 @@ class SoundTrigger:
                         print("Waiting for sounds above 100dB...")
                         
                         return output_filename
-            
-            # Return None on timeout
-            print("Monitoring timeout...")
-            return None
 
         except KeyboardInterrupt:
             print("\nMonitoring stopped...")

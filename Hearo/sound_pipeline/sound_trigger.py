@@ -1,656 +1,267 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sound Separator Module
-- separator.py 기반으로 구현
-- 각도 정보를 백엔드에 전달
-- 음원 분리 및 분류 기능
+Sound Trigger Module
+- 100dB 이상 소리 감지 시 1.024x4초 녹음
+- triggered_record.py 기반으로 구현
 """
 
-import os
-import sys
-import time
-import warnings
+import pyaudio
+import wave
 import numpy as np
-import torch
-import torch.nn.functional as F
-import torchaudio
-import requests
-from typing import List, Tuple, Optional, Dict, Any
+import time
+import sys
+import os
+from typing import Optional, Tuple
 
-# separator.py에서 사용하는 모듈들 import
-warnings.filterwarnings("ignore")
-torch.set_num_threads(4)
+# ===== 설정 =====
+FORMAT = pyaudio.paInt16
+RATE = 16000
+CHUNK = 1024
+THRESHOLD_DB = 30  # 30dB 임계값 (테스트용)
+RECORD_SECONDS = 1.024 * 4  # 1.024 x 4초 = 4.096초
+TARGET_DEVICE_KEYWORDS = ("ReSpeaker", "seeed", "SEEED")  # 장치명에 포함될 키워드
 
-try:
-    from transformers import ASTFeatureExtractor, ASTForAudioClassification
-except ImportError:
-    print("Warning: transformers not available. Sound separation will be disabled.")
-    ASTFeatureExtractor = None
-    ASTForAudioClassification = None
-
-# =========================
-# Config (separator.py와 동일)
-# =========================
-SR = 16000
-WIN_SEC = 4.096
-ANCHOR_SEC = 0.512
-L_FIXED = int(round(WIN_SEC * SR))
-
-NORMALIZE_TARGET_PEAK = 0.95
-RESIDUAL_CLIP_THR = 0.0005
-
-USE_ADAPTIVE_STRATEGY = True
-FALLBACK_THRESHOLD = 0.1
-
-MASK_SIGMOID_CENTER = 0.6
-MASK_SIGMOID_SLOPE = 20.0
-
-N_FFT, HOP, WINLEN = 400, 160, 400
-WINDOW = torch.hann_window(WINLEN)
-EPS = 1e-10
-
-N_MELS = 128
-
-SMOOTH_T = 19
-ALPHA_ATT = 0.60
-BETA_PUR = 1.50
-W_E = 0.40
-TOP_PCT_CORE_IN_ANCHOR = 0.50
-
-OMEGA_Q_CONSERVATIVE = 0.9
-OMEGA_Q_AGGRESSIVE = 0.7
-OMEGA_DIL = 2
-OMEGA_MIN_BINS = 5
-
-AST_FREQ_QUANTILE_CONSERVATIVE = 0.7
-AST_FREQ_QUANTILE_AGGRESSIVE = 0.4
-
-DANGER_IDS = {0,396, 397, 398, 399, 400, 426, 436}
-HELP_IDS = {23, 14, 354, 355, 356, 359}
-WARNING_IDS = {288, 364, 388, 389, 390, 439, 391, 392, 393, 395, 440, 441, 443, 456, 469, 470, 478, 479}
-
-PRES_Q = 0.20
-PRES_SMOOTH_T = 9
-
-USED_THRESHOLD = 0.65
-USED_DILATE_MS = 80
-ANCHOR_SUPPRESS_MS = 200
-ANCHOR_SUPPRESS_BASE = 0.6
-
-MAX_PASSES = 3
-MIN_ERATIO = 0.01
-
-# Backend API
-USER_ID = 6
-BACKEND_URL = "http://13.238.200.232:8000/sound-events/"
-
-
-class SoundSeparator:
-    def __init__(self, model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
-                 device: str = "auto", backend_url: str = BACKEND_URL):
+class SoundTrigger:
+    def __init__(self, output_dir: str = "recordings", led_controller=None):
         """
-        Sound Separator 초기화
+        Sound Trigger 초기화
         
         Args:
-            model_name: AST 모델 이름
-            device: 사용할 디바이스 (auto/cpu/cuda)
-            backend_url: 백엔드 API URL
+            output_dir: 녹음 파일 저장 디렉토리
+            led_controller: LED 컨트롤러 인스턴스 (wake up용)
         """
-        self.model_name = model_name
-        self.backend_url = backend_url
+        self.output_dir = output_dir
+        self.led_controller = led_controller
+        self.p = pyaudio.PyAudio()
+        self.stream = None
+        self.device_index = None
+        self.max_in_ch = 0
+        self.desired_channels = 0
         
-        # Device 설정
-        if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 출력 디렉토리 생성
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 장치 초기화
+        self._initialize_device()
+        
+    def _initialize_device(self):
+        """ReSpeaker 장치 초기화"""
+        self.device_index, self.max_in_ch = self._find_respeaker_input_device()
+        
+        # ReSpeaker v2.0이면 6채널(0~3: 마이크, 4: reference, 5: post-processed)을 시도
+        # 안 되면 사용 가능한 최대 입력 채널로 열고, 최종적으로 1채널 변환 저장
+        self.desired_channels = 6 if self.max_in_ch >= 6 else self.max_in_ch if self.max_in_ch > 0 else 1
+        
+        info = self.p.get_device_info_by_index(self.device_index)
+        print(f"[Device] index={self.device_index}, name='{info.get('name')}', maxInputChannels={self.max_in_ch}")
+        print(f"[Open] channels={self.desired_channels}, rate={RATE}")
+        
+        self.stream = self.p.open(
+            format=FORMAT,
+            channels=self.desired_channels,
+            rate=RATE,
+            input=True,
+            input_device_index=self.device_index,
+            frames_per_buffer=CHUNK
+        )
+        
+    def _find_respeaker_input_device(self) -> Tuple[int, int]:
+        """ReSpeaker 입력 장치 찾기"""
+        device_index = None
+        max_in_ch = 0
+        for i in range(self.p.get_device_count()):
+            info = self.p.get_device_info_by_index(i)
+            name = info.get('name', '')
+            is_input = int(info.get('maxInputChannels', 0)) > 0
+            if is_input and any(k.lower() in name.lower() for k in TARGET_DEVICE_KEYWORDS):
+                device_index = i
+                max_in_ch = int(info.get('maxInputChannels', 0))
+                break
+        
+        # 못 찾았으면 기본 입력 장치 사용
+        if device_index is None:
+            default_idx = self.p.get_default_input_device_info().get('index', None)
+            if default_idx is None:
+                print("입력 장치를 찾을 수 없습니다.", file=sys.stderr)
+                sys.exit(1)
+            info = self.p.get_device_info_by_index(default_idx)
+            device_index = default_idx
+            max_in_ch = int(info.get('maxInputChannels', 0))
+        
+        return device_index, max_in_ch
+    
+    def _to_mono_int16(self, interleaved: np.ndarray, num_channels: int) -> np.ndarray:
+        """멀티채널 int16 interleaved -> 모노 int16 (채널5 우선, 없으면 마이크 평균)"""
+        if num_channels <= 1:
+            return interleaved.astype(np.int16)
+
+        # 길이가 채널 수로 딱 나눠떨어지도록 잘라서 reshape
+        usable_len = (len(interleaved) // num_channels) * num_channels
+        if usable_len != len(interleaved):
+            interleaved = interleaved[:usable_len]
+        x = interleaved.reshape(-1, num_channels)
+
+        # 채널 5가 있으면 (ReSpeaker post-processed/beamformed) 그 채널만 사용
+        if num_channels >= 6:
+            mono = x[:, 5].astype(np.int16)
         else:
-            self.device = torch.device(device)
-        
-        self.extractor = None
-        self.ast_model = None
-        self.mel_fb_m2f = None
-        self.is_available = False
-        
-        self._initialize_model()
-    
-    def _initialize_model(self):
-        """AST 모델 초기화"""
-        try:
-            if ASTFeatureExtractor is None or ASTForAudioClassification is None:
-                print("[Separator] Transformers not available, using mock mode")
-                self.is_available = False
-                return
-            
-            print(f"[Separator] Loading AST model: {self.model_name}")
-            print(f"[Separator] Device: {self.device}")
-            
-            self.extractor = ASTFeatureExtractor.from_pretrained(self.model_name)
-            self.ast_model = ASTForAudioClassification.from_pretrained(self.model_name).to(self.device)
-            self.ast_model.eval()
-            
-            # Mel filterbank 생성
-            self.mel_fb_m2f = torchaudio.transforms.MelScale(n_mels=N_MELS, sample_rate=SR, n_stft=N_FFT//2+1).fb
-            
-            self.is_available = True
-            print("[Separator] AST model loaded successfully")
-            
-        except Exception as e:
-            print(f"[Separator] Model loading error: {e}")
-            self.is_available = False
-    
-    def _get_sound_type(self, class_id: int) -> str:
-        """클래스 ID를 소리 타입으로 변환"""
-        if class_id in DANGER_IDS:
-            return "danger"
-        elif class_id in HELP_IDS:
-            return "help"
-        elif class_id in WARNING_IDS:
-            return "warning"
-        else:
-            return "other"
-    
-    def _calculate_decibel(self, audio: np.ndarray) -> Tuple[float, float, float]:
+            # 일반 마이크 채널 평균 (가능하면 앞쪽 4채널만 평균)
+            mic_cols = min(num_channels, 4)
+            mono = np.mean(x[:, :mic_cols], axis=1).astype(np.int16)
+        return mono
+
+    def _calculate_db_level(self, interleaved: np.ndarray, num_channels: int) -> float:
         """dB 레벨 계산"""
-        # 오디오 데이터 검증
-        if len(audio) == 0:
-            return -np.inf, -np.inf, -np.inf
-        
+        if num_channels <= 1:
+            audio_data = interleaved.astype(np.float32)
+        else:
+            usable_len = (len(interleaved) // num_channels) * num_channels
+            x = interleaved[:usable_len].reshape(-1, num_channels)
+
+            # 채널 0만 사용 (ReSpeaker 4 Mic Array에서 실제로 사용되는 채널)
+            if num_channels >= 1:
+                audio_data = x[:, 0].astype(np.float32)  # 채널 0만 사용
+            else:
+                audio_data = interleaved.astype(np.float32)
+
         # RMS 계산
-        rms = np.sqrt(np.mean(audio**2))
+        rms = np.sqrt(np.mean(audio_data**2))
         
-        # 디버깅: 오디오 데이터 상태 확인
-        #print(f"[Separator] Audio data: len={len(audio)}, range={np.min(audio):.3f} to {np.max(audio):.3f}, RMS={rms:.3f}")
+        # Debug output removed
         
         if rms == 0:
-            return -np.inf, -np.inf, -np.inf
+            return -np.inf
         
         # dB 변환 (20 * log10(rms))
+        # RMS가 0이 아닌 경우에만 dB 계산
         if rms > 0:
             db = 20 * np.log10(rms)
             
             # 유효한 dB 값인지 확인
             if np.isnan(db) or np.isinf(db):
-                print(f"[Separator] Invalid dB value: {db}")
-                return -np.inf, -np.inf, -np.inf
-        else:
-            return -np.inf, -np.inf, -np.inf
-        
-        # min, max dB 계산
-        audio_abs = np.abs(audio)
-        audio_abs = audio_abs[audio_abs > 0]  # 0이 아닌 값만 사용
-        
-        if len(audio_abs) > 0:
-            db_min = 20 * np.log10(np.min(audio_abs))
-            db_max = 20 * np.log10(np.max(audio_abs))
-        else:
-            db_min = db_max = db
-        
-        print(f"[Separator] Calculated dB: min={db_min:.1f}, max={db_max:.1f}, mean={db:.1f}")
-        return db_min, db_max, db
-    
-    def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
-        """
-        Send results to backend (including angle information)
-        
-        Args:
-            sound_type: Sound type (danger/warning/help/other)
-            sound_detail: Sound detail information
-            decibel: dB level
-            angle: Angle (0-359)
-            
-        Returns:
-            Transmission success status
-        """
-        try:
-            data = {
-                "user_id": USER_ID,
-                "sound_type": sound_type,
-                "sound_detail": sound_detail,
-                "angle": angle,  # Include angle information
-                "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "sound_icon": "string",
-                "location_image_url": "string",
-                "decibel": float(decibel),
-            }
-            
-            headers = {
-                'Content-Type': 'application/json',
-                'User-Agent': 'SoundPipeline/1.0'
-            }
-            
-            print(f"🔄 Sending to backend: {self.backend_url}")
-            print(f"📤 Data: {data}")
-            
-            # Disable SSL warnings for testing
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            response = requests.post(
-                self.backend_url, 
-                json=data, 
-                headers=headers,
-                timeout=10.0,  # Increased timeout
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                print(f"✅ Sent to backend: {sound_detail} ({sound_type}) at {angle}°")
-                return True
-            else:
-                print(f"❌ Backend error: {response.status_code}")
-                print(f"❌ Response: {response.text}")
-                return False
+                return -np.inf
                 
-        except requests.exceptions.ConnectTimeout:
-            print(f"❌ Backend connection timeout: {self.backend_url}")
-            return False
-        except requests.exceptions.ConnectionError as e:
-            print(f"❌ Backend connection error: {e}")
-            return False
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Backend request error: {e}")
-            return False
-        except Exception as e:
-            print(f"❌ Unexpected error sending to backend: {e}")
-            return False
-    
-    def _load_fixed_audio(self, path: str) -> np.ndarray:
-        """오디오 파일 로드 및 고정 길이로 조정"""
-        wav, sro = torchaudio.load(path)
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        if sro != SR:
-            wav = torchaudio.functional.resample(wav, sro, SR)
-        wav = wav.squeeze().numpy().astype(np.float32)
-        if len(wav) >= L_FIXED:
-            return wav[:L_FIXED]
-        out = np.zeros(L_FIXED, dtype=np.float32)
-        out[:len(wav)] = wav
-        return out
-    
-    def _classify_audio(self, audio: np.ndarray) -> Tuple[str, str, int, float]:
+            return db
+        else:
+            return -np.inf
+
+    def _level_for_trigger(self, interleaved: np.ndarray, num_channels: int) -> float:
+        """트리거 판정 레벨(RMS 또는 abs max). 채널5가 있으면 그 채널 기준."""
+        if num_channels <= 1:
+            return float(np.max(np.abs(interleaved)))
+        usable_len = (len(interleaved) // num_channels) * num_channels
+        x = interleaved[:usable_len].reshape(-1, num_channels)
+
+        if num_channels >= 6:
+            ch = x[:, 5].astype(np.int16)
+        else:
+            ch = np.mean(x[:, :min(num_channels, 4)], axis=1).astype(np.int16)
+
+        return float(np.max(np.abs(ch)))
+
+    def start_monitoring(self) -> Optional[str]:
         """
-        오디오 분류 (간단한 버전)
+        Start sound monitoring
         
-        Args:
-            audio: 오디오 데이터
-            
         Returns:
-            (class_name, sound_type, class_id, confidence)
+            Recorded file path (when triggered), None (no trigger)
         """
-        if not self.is_available:
-            # Mock 분류 결과
-            return "Unknown", "other", 0, 0.5
+        print("Waiting for sounds above 100dB... (Press Ctrl+C to stop)")
+        
+        recording = False
+        frames_bytes = []
+        samples_collected = 0
+        target_samples = int(RECORD_SECONDS * RATE)
         
         try:
-            # 10초로 패딩
-            target_len = int(10.0 * SR)
-            if len(audio) < target_len:
-                audio_padded = np.zeros(target_len, dtype=np.float32)
-                audio_padded[:len(audio)] = audio
-            else:
-                audio_padded = audio[:target_len]
-            
-            feat = self.extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
-            
-            with torch.no_grad():
-                outputs = self.ast_model(input_values=feat["input_values"].to(self.device))
-                logits = outputs.logits
-                probabilities = torch.softmax(logits, dim=-1)
-                predicted_class_id = logits.argmax(dim=-1).item()
-                confidence = probabilities[0, predicted_class_id].item()
-            
-            class_name = self.ast_model.config.id2label[predicted_class_id]
-            sound_type = self._get_sound_type(predicted_class_id)
-            
-            return class_name, sound_type, predicted_class_id, confidence
-            
-        except Exception as e:
-            print(f"[Separator] Classification error: {e}")
-            return "Unknown", "other", 0, 0.0
-    
-    def _save_separated_audio(self, audio: np.ndarray, class_name: str, sound_type: str, output_dir: str) -> str:
-        """
-        분리된 오디오를 파일로 저장
-        
-        Args:
-            audio: 오디오 데이터
-            class_name: 분류된 클래스 이름
-            sound_type: 소리 타입
-            output_dir: 저장 디렉토리
-            
-        Returns:
-            저장된 파일 경로
-        """
-        try:
-            # 출력 디렉토리 생성
-            os.makedirs(output_dir, exist_ok=True)
-            
-            # 파일명 생성 (타임스탬프 + 클래스명 + 타입)
+            # Monitor with a reasonable timeout
             import time
-            timestamp = int(time.time())
-            safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-            safe_class_name = safe_class_name.replace(' ', '_')
+            start_time = time.time()
+            timeout = 300  # 5 minutes timeout (longer for testing)
             
-            filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}.wav"
-            filepath = os.path.join(output_dir, filename)
+            while time.time() - start_time < timeout:
+                raw = self.stream.read(CHUNK, exception_on_overflow=False)
+                data_i16 = np.frombuffer(raw, dtype=np.int16)
+
+                # Calculate dB level
+                db_level = self._calculate_db_level(data_i16, self.desired_channels)
+                
+                # Debug output removed for cleaner operation
+                
+                # Check trigger (above 100dB)
+                if not recording and db_level >= THRESHOLD_DB:
+                    print(f"Sound detected! ({db_level:.1f}dB) micarray wake up...")
+                    
+                    # Execute wake up if LED controller is available
+                    if self.led_controller:
+                        self.led_controller.wakeup_from_sleep()
+                    
+                    print("Recording started...")
+                    recording = True
+                    frames_bytes = []
+                    samples_collected = 0
+
+                if recording:
+                    mono = self._to_mono_int16(data_i16, self.desired_channels)
+                    frames_bytes.append(mono.tobytes())
+                    samples_collected += len(mono)
+
+                    if samples_collected >= target_samples:
+                        recording = False
+                        print("녹음 종료. 파일 저장 중...")
+
+                        # 파일명에 타임스탬프 포함
+                        timestamp = int(time.time())
+                        output_filename = os.path.join(self.output_dir, f"triggered_recording_{timestamp}.wav")
+                        
+                        # WAV 파일 저장
+                        wf = wave.open(output_filename, 'wb')
+                        wf.setnchannels(1)
+                        wf.setsampwidth(self.p.get_sample_size(FORMAT))
+                        wf.setframerate(RATE)
+                        wf.writeframes(b''.join(frames_bytes))
+                        wf.close()
+
+                        print(f"Saved: {output_filename}")
+                        print("Waiting for sounds above 100dB...")
+                        
+                        return output_filename
             
-            # 오디오 저장
-            torchaudio.save(filepath, torch.from_numpy(audio).unsqueeze(0), SR)
-            
-            print(f"[Separator] Separated audio saved: {filename}")
-            return filepath
-            
-        except Exception as e:
-            print(f"[Separator] Error saving separated audio: {e}")
+            # Timeout reached
+            print("Monitoring timeout (5 minutes) - no sound detected")
             return None
-    
-    def process_audio(self, audio_file: str, angle: int, output_dir: str = None) -> Dict[str, Any]:
-        """
-        오디오 파일 처리 및 분류
-        
-        Args:
-            audio_file: 오디오 파일 경로
-            angle: 각도 (0-359)
-            output_dir: 분리된 소리 저장 디렉토리
-            
-        Returns:
-            처리 결과 딕셔너리
-        """
-        print(f"[Separator] Processing audio: {audio_file}")
-        print(f"[Separator] Angle: {angle}°")
-        
-        try:
-            # 오디오 로드
-            audio = self._load_fixed_audio(audio_file)
-            print(f"[Separator] Audio length: {len(audio)/SR:.2f}s")
-            
-            # 분류
-            class_name, sound_type, class_id, confidence = self._classify_audio(audio)
-            
-            # dB 계산
-            db_min, db_max, db_mean = self._calculate_decibel(audio)
-            
-            print(f"[Separator] Classified: {class_name} ({sound_type})")
-            print(f"[Separator] Confidence: {confidence:.3f}")
-            print(f"[Separator] Decibel: {db_mean:.1f} dB")
-            
-            # 분리된 소리 저장
-            separated_file = None
-            if output_dir:
-                separated_file = self._save_separated_audio(audio, class_name, sound_type, output_dir)
-            
-            # 백엔드 전송 (other 타입 제외)
-            backend_success = False
-            if sound_type != "other":
-                backend_success = self._send_to_backend(sound_type, class_name, db_mean, angle)
-            else:
-                print(f"[Separator] Skipping backend send for 'other' type: {class_name}")
-                backend_success = True
-            
-            # 결과 반환
-            result = {
-                "success": True,
-                "class_name": class_name,
-                "sound_type": sound_type,
-                "class_id": class_id,
-                "confidence": confidence,
-                "angle": angle,
-                "decibel": {
-                    "min": db_min,
-                    "max": db_max,
-                    "mean": db_mean
-                },
-                "backend_success": backend_success,
-                "audio_file": audio_file,
-                "separated_file": separated_file
-            }
-            
-            return result
-            
+
+        except KeyboardInterrupt:
+            print("\nMonitoring stopped...")
+            return None
         except Exception as e:
-            print(f"[Separator] Processing error: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "audio_file": audio_file,
-                "angle": angle
-            }
-    
-    def is_model_available(self) -> bool:
-        """모델 사용 가능 여부 확인"""
-        return self.is_available
-    
+            print(f"Error occurred: {e}")
+            return None
+
     def cleanup(self):
-        """리소스 정리"""
-        # PyTorch 모델은 자동으로 정리됨
-        pass
-    
+        """Clean up resources"""
+        try:
+            if self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+        finally:
+            if self.p:
+                self.p.terminate()
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.cleanup()
-
-
-class MockSoundSeparator:
-    """
-    모델이 없을 때 사용하는 Mock 클래스
-    테스트용으로 랜덤 분류 결과 반환
-    """
-    
-    def __init__(self, backend_url: str = BACKEND_URL):
-        self.backend_url = backend_url
-        self.is_available = False
-        print("[Separator] Mock Sound Separator initialized (no real model)")
-    
-    def process_audio(self, audio_file: str, angle: int, output_dir: str = None) -> Dict[str, Any]:
-        """Mock 처리 결과 반환"""
-        import random
-        
-        # Mock 분류 결과
-        mock_classes = [
-            ("Gunshot", "danger", 396, 0.85),
-            ("Scream", "danger", 397, 0.90),
-            ("Car horn", "warning", 288, 0.75),
-            ("Dog bark", "warning", 364, 0.80),
-            ("Help", "help", 23, 0.70),
-            ("Unknown", "other", 0, 0.50)
-        ]
-        
-        class_name, sound_type, class_id, confidence = random.choice(mock_classes)
-        
-        # Mock dB 계산
-        db_mean = random.uniform(60, 120)
-        
-        print(f"[Separator] Mock classified: {class_name} ({sound_type})")
-        print(f"[Separator] Mock confidence: {confidence:.3f}")
-        print(f"[Separator] Mock decibel: {db_mean:.1f} dB")
-        
-        # Mock 분리된 소리 저장
-        separated_file = None
-        if output_dir:
-            separated_file = self._save_separated_audio_mock(audio_file, class_name, sound_type, output_dir)
-        
-        # Mock 백엔드 전송 (실제 전송 시도)
-        backend_success = True
-        if sound_type != "other":
-            print(f"[Separator] Mock backend send: {sound_type} at {angle}°")
-            # 실제 백엔드 전송 시도
-            backend_success = self._send_to_backend_mock(sound_type, class_name, db_mean, angle)
-        
-        return {
-            "success": True,
-            "class_name": class_name,
-            "sound_type": sound_type,
-            "class_id": class_id,
-            "confidence": confidence,
-            "angle": angle,
-            "decibel": {
-                "min": db_mean - 10,
-                "max": db_mean + 10,
-                "mean": db_mean
-            },
-            "backend_success": backend_success,
-            "audio_file": audio_file,
-            "separated_file": separated_file
-        }
-    
-    def _save_separated_audio_mock(self, audio_file: str, class_name: str, sound_type: str, output_dir: str) -> str:
-        """Mock 분리된 오디오 저장"""
-        try:
-            import shutil
-            import time
-            
-            # 출력 디렉토리 생성
-            os.makedirs(output_dir, exist_ok=True)
-            
-            # 파일명 생성
-            timestamp = int(time.time())
-            safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-            safe_class_name = safe_class_name.replace(' ', '_')
-            
-            filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}.wav"
-            filepath = os.path.join(output_dir, filename)
-            
-            # 원본 파일을 복사 (Mock)
-            shutil.copy2(audio_file, filepath)
-            
-            print(f"[Separator] Mock separated audio saved: {filename}")
-            return filepath
-            
-        except Exception as e:
-            print(f"[Separator] Mock error saving separated audio: {e}")
-            return None
-    
-    def _send_to_backend_mock(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
-        """Mock backend transmission (actually tries to send)"""
-        try:
-            data = {
-                "user_id": USER_ID,
-                "sound_type": sound_type,
-                "sound_detail": sound_detail,
-                "angle": angle,
-                "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "sound_icon": "string",
-                "location_image_url": "string",
-                "decibel": float(decibel),
-            }
-            
-            headers = {
-                'Content-Type': 'application/json',
-                'User-Agent': 'SoundPipeline/1.0'
-            }
-            
-            print(f"🔄 Mock sending to backend: {self.backend_url}")
-            print(f"📤 Mock data: {data}")
-            
-            # Disable SSL warnings for testing
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            response = requests.post(
-                self.backend_url, 
-                json=data, 
-                headers=headers,
-                timeout=10.0,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                print(f"✅ Mock sent to backend: {sound_detail} ({sound_type}) at {angle}°")
-                return True
-            else:
-                print(f"❌ Mock backend error: {response.status_code}")
-                print(f"❌ Mock response: {response.text}")
-                return False
-                
-        except requests.exceptions.ConnectTimeout:
-            print(f"❌ Mock backend connection timeout: {self.backend_url}")
-            return False
-        except requests.exceptions.ConnectionError as e:
-            print(f"❌ Mock backend connection error: {e}")
-            return False
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Mock backend request error: {e}")
-            return False
-        except Exception as e:
-            print(f"❌ Mock unexpected error sending to backend: {e}")
-            return False
-    
-    def is_model_available(self) -> bool:
-        """Mock은 항상 사용 가능"""
-        return True
-    
-    def cleanup(self):
-        """Mock 정리"""
-        pass
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
-
-
-def create_sound_separator(model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
-                          device: str = "auto", backend_url: str = BACKEND_URL) -> SoundSeparator:
-    """
-    Sound Separator 인스턴스 생성
-    모델이 없으면 Mock 버전 반환
-    
-    Args:
-        model_name: AST 모델 이름
-        device: 사용할 디바이스
-        backend_url: 백엔드 API URL
-        
-    Returns:
-        SoundSeparator 또는 MockSoundSeparator 인스턴스
-    """
-    separator = SoundSeparator(model_name, device, backend_url)
-    
-    if not separator.is_model_available():
-        print("[Separator] Real model not available, using mock separator")
-        return MockSoundSeparator(backend_url)
-    
-    return separator
 
 
 def main():
     """테스트용 메인 함수"""
-    import tempfile
-    import numpy as np
-    
-    # 테스트용 오디오 파일 생성
-    test_audio = np.random.randn(16000).astype(np.float32)  # 1초 오디오
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-        torchaudio.save(f.name, torch.from_numpy(test_audio).unsqueeze(0), SR)
-        test_file = f.name
-    
-    try:
-        with create_sound_separator() as separator:
-            print("Sound Separator 테스트 시작...")
-            
-            result = separator.process_audio(test_file, 180)
-            
-            print("처리 결과:")
-            print(f"  Success: {result['success']}")
-            if result['success']:
-                print(f"  Class: {result['class_name']}")
-                print(f"  Type: {result['sound_type']}")
-                print(f"  Confidence: {result['confidence']:.3f}")
-                print(f"  Angle: {result['angle']}°")
-                print(f"  Decibel: {result['decibel']['mean']:.1f} dB")
-                print(f"  Backend: {'✅' if result['backend_success'] else '❌'}")
-            else:
-                print(f"  Error: {result.get('error', 'Unknown error')}")
-            
-            print("Sound Separator 테스트 완료")
-    
-    finally:
-        # 테스트 파일 정리
-        if os.path.exists(test_file):
-            os.unlink(test_file)
+    with SoundTrigger() as trigger:
+        recorded_file = trigger.start_monitoring()
+        if recorded_file:
+            print(f"녹음 완료: {recorded_file}")
 
 
 if __name__ == "__main__":

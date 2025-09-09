@@ -151,36 +151,62 @@ class SoundSeparator:
     
     def _calculate_decibel(self, audio: np.ndarray) -> Tuple[float, float, float]:
         """dB 레벨 계산"""
+        # 오디오 데이터 검증
+        if len(audio) == 0:
+            return -np.inf, -np.inf, -np.inf
+        
+        # RMS 계산
         rms = np.sqrt(np.mean(audio**2))
+        
+        # 디버깅: 오디오 데이터 상태 확인
+        #print(f"[Separator] Audio data: len={len(audio)}, range={np.min(audio):.3f} to {np.max(audio):.3f}, RMS={rms:.3f}")
+        
         if rms == 0:
             return -np.inf, -np.inf, -np.inf
         
-        db = 20 * np.log10(rms + 1e-10)
-        db_min = 20 * np.log10(np.min(np.abs(audio)) + 1e-10)
-        db_max = 20 * np.log10(np.max(np.abs(audio)) + 1e-10)
-        db_mean = db
+        # dB 변환 (20 * log10(rms))
+        if rms > 0:
+            db = 20 * np.log10(rms)
+            
+            # 유효한 dB 값인지 확인
+            if np.isnan(db) or np.isinf(db):
+                print(f"[Separator] Invalid dB value: {db}")
+                return -np.inf, -np.inf, -np.inf
+        else:
+            return -np.inf, -np.inf, -np.inf
         
-        return db_min, db_max, db_mean
+        # min, max dB 계산
+        audio_abs = np.abs(audio)
+        audio_abs = audio_abs[audio_abs > 0]  # 0이 아닌 값만 사용
+        
+        if len(audio_abs) > 0:
+            db_min = 20 * np.log10(np.min(audio_abs))
+            db_max = 20 * np.log10(np.max(audio_abs))
+        else:
+            db_min = db_max = db
+        
+        print(f"[Separator] Calculated dB: min={db_min:.1f}, max={db_max:.1f}, mean={db:.1f}")
+        return db_min, db_max, db
     
     def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
         """
-        백엔드로 결과 전송 (각도 정보 포함)
+        Send results to backend (including angle information)
         
         Args:
-            sound_type: 소리 타입 (danger/warning/help/other)
-            sound_detail: 소리 상세 정보
-            decibel: dB 레벨
-            angle: 각도 (0-359)
+            sound_type: Sound type (danger/warning/help/other)
+            sound_detail: Sound detail information
+            decibel: dB level
+            angle: Angle (0-359)
             
         Returns:
-            전송 성공 여부
+            Transmission success status
         """
         try:
             data = {
                 "user_id": USER_ID,
                 "sound_type": sound_type,
                 "sound_detail": sound_detail,
-                "angle": angle,  # 각도 정보 포함
+                "angle": angle,  # Include angle information
                 "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "sound_icon": "string",
                 "location_image_url": "string",
@@ -195,11 +221,15 @@ class SoundSeparator:
             print(f"🔄 Sending to backend: {self.backend_url}")
             print(f"📤 Data: {data}")
             
+            # Disable SSL warnings for testing
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
             response = requests.post(
                 self.backend_url, 
                 json=data, 
                 headers=headers,
-                timeout=3.0,
+                timeout=10.0,  # Increased timeout
                 verify=False
             )
             
@@ -217,11 +247,11 @@ class SoundSeparator:
         except requests.exceptions.ConnectionError as e:
             print(f"❌ Backend connection error: {e}")
             return False
-        except requests.exceptions.Timeout:
-            print(f"❌ Backend request timeout: {self.backend_url}")
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Backend request error: {e}")
             return False
         except Exception as e:
-            print(f"❌ Backend error: {e}")
+            print(f"❌ Unexpected error sending to backend: {e}")
             return False
     
     def _load_fixed_audio(self, path: str) -> np.ndarray:
@@ -442,10 +472,12 @@ class MockSoundSeparator:
         if output_dir:
             separated_file = self._save_separated_audio_mock(audio_file, class_name, sound_type, output_dir)
         
-        # Mock 백엔드 전송
+        # Mock 백엔드 전송 (실제 전송 시도)
         backend_success = True
         if sound_type != "other":
             print(f"[Separator] Mock backend send: {sound_type} at {angle}°")
+            # 실제 백엔드 전송 시도
+            backend_success = self._send_to_backend_mock(sound_type, class_name, db_mean, angle)
         
         return {
             "success": True,
@@ -490,6 +522,61 @@ class MockSoundSeparator:
         except Exception as e:
             print(f"[Separator] Mock error saving separated audio: {e}")
             return None
+    
+    def _send_to_backend_mock(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
+        """Mock backend transmission (actually tries to send)"""
+        try:
+            data = {
+                "user_id": USER_ID,
+                "sound_type": sound_type,
+                "sound_detail": sound_detail,
+                "angle": angle,
+                "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "sound_icon": "string",
+                "location_image_url": "string",
+                "decibel": float(decibel),
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'SoundPipeline/1.0'
+            }
+            
+            print(f"🔄 Mock sending to backend: {self.backend_url}")
+            print(f"📤 Mock data: {data}")
+            
+            # Disable SSL warnings for testing
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            response = requests.post(
+                self.backend_url, 
+                json=data, 
+                headers=headers,
+                timeout=10.0,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ Mock sent to backend: {sound_detail} ({sound_type}) at {angle}°")
+                return True
+            else:
+                print(f"❌ Mock backend error: {response.status_code}")
+                print(f"❌ Mock response: {response.text}")
+                return False
+                
+        except requests.exceptions.ConnectTimeout:
+            print(f"❌ Mock backend connection timeout: {self.backend_url}")
+            return False
+        except requests.exceptions.ConnectionError as e:
+            print(f"❌ Mock backend connection error: {e}")
+            return False
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Mock backend request error: {e}")
+            return False
+        except Exception as e:
+            print(f"❌ Mock unexpected error sending to backend: {e}")
+            return False
     
     def is_model_available(self) -> bool:
         """Mock은 항상 사용 가능"""

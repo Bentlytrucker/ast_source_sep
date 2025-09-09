@@ -151,42 +151,39 @@ class SoundSeparator:
     
     def _calculate_decibel(self, audio: np.ndarray) -> Tuple[float, float, float]:
         """dB 레벨 계산"""
-        # 오디오 데이터 검증
-        if len(audio) == 0:
-            return -np.inf, -np.inf, -np.inf
-        
-        # RMS 계산
-        rms = np.sqrt(np.mean(audio**2))
-        
-        # 디버깅: 오디오 데이터 상태 확인
-        #print(f"[Separator] Audio data: len={len(audio)}, range={np.min(audio):.3f} to {np.max(audio):.3f}, RMS={rms:.3f}")
-        
-        if rms == 0:
-            return -np.inf, -np.inf, -np.inf
-        
-        # dB 변환 (20 * log10(rms))
-        if rms > 0:
+        try:
+            # 오디오 데이터 검증
+            if len(audio) == 0:
+                return -np.inf, -np.inf, -np.inf
+            
+            # RMS 계산
+            rms = np.sqrt(np.mean(audio**2))
+            
+            if rms <= 0:
+                return -np.inf, -np.inf, -np.inf
+            
+            # dB 변환 (20 * log10(rms))
             db = 20 * np.log10(rms)
             
             # 유효한 dB 값인지 확인
             if np.isnan(db) or np.isinf(db):
-                print(f"[Separator] Invalid dB value: {db}")
                 return -np.inf, -np.inf, -np.inf
-        else:
+            
+            # min, max dB 계산 (간단한 방법)
+            audio_abs = np.abs(audio)
+            audio_abs = audio_abs[audio_abs > 1e-10]  # 매우 작은 값 제외
+            
+            if len(audio_abs) > 0:
+                db_min = 20 * np.log10(np.min(audio_abs))
+                db_max = 20 * np.log10(np.max(audio_abs))
+            else:
+                db_min = db_max = db
+            
+            return db_min, db_max, db
+            
+        except Exception as e:
+            print(f"[Separator] dB calculation error: {e}")
             return -np.inf, -np.inf, -np.inf
-        
-        # min, max dB 계산
-        audio_abs = np.abs(audio)
-        audio_abs = audio_abs[audio_abs > 0]  # 0이 아닌 값만 사용
-        
-        if len(audio_abs) > 0:
-            db_min = 20 * np.log10(np.min(audio_abs))
-            db_max = 20 * np.log10(np.max(audio_abs))
-        else:
-            db_min = db_max = db
-        
-        print(f"[Separator] Calculated dB: min={db_min:.1f}, max={db_max:.1f}, mean={db:.1f}")
-        return db_min, db_max, db
     
     def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
         """
@@ -256,17 +253,36 @@ class SoundSeparator:
     
     def _load_fixed_audio(self, path: str) -> np.ndarray:
         """오디오 파일 로드 및 고정 길이로 조정"""
-        wav, sro = torchaudio.load(path)
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        if sro != SR:
-            wav = torchaudio.functional.resample(wav, sro, SR)
-        wav = wav.squeeze().numpy().astype(np.float32)
-        if len(wav) >= L_FIXED:
-            return wav[:L_FIXED]
-        out = np.zeros(L_FIXED, dtype=np.float32)
-        out[:len(wav)] = wav
-        return out
+        try:
+            wav, sro = torchaudio.load(path)
+            
+            # 스테레오를 모노로 변환
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+            
+            # 샘플링 레이트 변환
+            if sro != SR:
+                wav = torchaudio.functional.resample(wav, sro, SR)
+            
+            # numpy 배열로 변환
+            wav = wav.squeeze().numpy().astype(np.float32)
+            
+            # 데이터 검증
+            if len(wav) == 0:
+                print(f"[Separator] Warning: Empty audio data from {path}")
+                return np.zeros(L_FIXED, dtype=np.float32)
+            
+            # 고정 길이로 조정
+            if len(wav) >= L_FIXED:
+                return wav[:L_FIXED]
+            else:
+                out = np.zeros(L_FIXED, dtype=np.float32)
+                out[:len(wav)] = wav
+                return out
+                
+        except Exception as e:
+            print(f"[Separator] Error loading audio {path}: {e}")
+            return np.zeros(L_FIXED, dtype=np.float32)
     
     def _classify_audio(self, audio: np.ndarray) -> Tuple[str, str, int, float]:
         """

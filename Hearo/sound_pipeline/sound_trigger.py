@@ -131,6 +131,11 @@ class SoundTrigger:
         
         # dB 변환 (20 * log10(rms))
         db = 20 * np.log10(rms + 1e-10)
+        
+        # 유효한 dB 값인지 확인
+        if np.isnan(db) or np.isinf(db):
+            return -np.inf
+            
         return db
 
     def _level_for_trigger(self, interleaved: np.ndarray, num_channels: int) -> float:
@@ -177,6 +182,8 @@ class SoundTrigger:
                 # Debug: Print dB level occasionally
                 if int(time.time()) % 10 == 0:  # Every 10 seconds
                     print(f"Current dB level: {db_level:.1f}dB (threshold: {THRESHOLD_DB}dB)")
+                    print(f"Audio data length: {len(data_i16)}, Channels: {self.desired_channels}")
+                    print(f"Data range: {np.min(data_i16)} to {np.max(data_i16)}")
                 
                 # Check trigger (above 100dB)
                 if not recording and db_level >= THRESHOLD_DB:

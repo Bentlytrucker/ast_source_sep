@@ -186,6 +186,99 @@ class SoundSeparator:
             print(f"[Separator] dB calculation error: {e}")
             return -np.inf, -np.inf, -np.inf
     
+    def _prepare_audio_for_classification(self, audio_raw: np.ndarray) -> np.ndarray:
+        """
+        분류용 정규화된 오디오 데이터 준비
+        
+        Args:
+            audio_raw: 원본 int16 오디오 데이터
+            
+        Returns:
+            정규화된 float32 오디오 데이터
+        """
+        try:
+            # int16을 float32로 정규화 (-1.0 ~ 1.0 범위)
+            audio_normalized = audio_raw.astype(np.float32) / 32767.0
+            
+            # 10초로 패딩
+            target_len = int(10.0 * SR)
+            if len(audio_normalized) < target_len:
+                audio_padded = np.zeros(target_len, dtype=np.float32)
+                audio_padded[:len(audio_normalized)] = audio_normalized
+                return audio_padded
+            else:
+                return audio_normalized[:target_len]
+                
+        except Exception as e:
+            print(f"[Separator] Error preparing audio for classification: {e}")
+            return audio_raw.astype(np.float32) / 32767.0
+    
+    def _calculate_decibel_from_raw(self, audio_raw: np.ndarray) -> Tuple[float, float, float]:
+        """
+        원본 raw 데이터에서 데시벨 계산 (Sound Trigger와 동일한 방법)
+        
+        Args:
+            audio_raw: 원본 int16 오디오 데이터
+            
+        Returns:
+            (db_min, db_max, db_mean)
+        """
+        try:
+            if len(audio_raw) == 0:
+                print(f"[Separator] Debug: Empty raw audio data")
+                return -np.inf, -np.inf, -np.inf
+            
+            # 디버그: 원본 오디오 데이터 정보
+            print(f"[Separator] Debug: Raw audio range: {audio_raw.min()} to {audio_raw.max()}")
+            print(f"[Separator] Debug: Raw audio mean: {audio_raw.mean():.1f}, std: {audio_raw.std():.1f}")
+            print(f"[Separator] Debug: Raw audio dtype: {audio_raw.dtype}")
+            
+            # Sound Trigger와 동일한 방식: int16을 float32로 변환
+            audio_float = audio_raw.astype(np.float32)
+            
+            # RMS 계산 (Sound Trigger와 동일)
+            rms = np.sqrt(np.mean(audio_float**2))
+            print(f"[Separator] Debug: Raw RMS: {rms:.6f}")
+            
+            if rms == 0:
+                print(f"[Separator] Debug: Raw RMS is zero")
+                return -np.inf, -np.inf, -np.inf
+            
+            # dB 변환 (20 * log10(rms)) - Sound Trigger와 동일
+            db = 20 * np.log10(rms)
+            print(f"[Separator] Debug: Raw calculated dB: {db:.3f}")
+            
+            # 유효한 dB 값인지 확인
+            if np.isnan(db) or np.isinf(db):
+                print(f"[Separator] Debug: Raw dB is NaN or inf: {db}")
+                return -np.inf, -np.inf, -np.inf
+            
+            # min, max dB 계산
+            audio_abs = np.abs(audio_float)
+            audio_abs = audio_abs[audio_abs > 1e-10]  # 매우 작은 값 제외
+            
+            if len(audio_abs) > 0:
+                db_min = 20 * np.log10(np.min(audio_abs))
+                db_max = 20 * np.log10(np.max(audio_abs))
+                
+                # 유효성 검사
+                if np.isnan(db_min) or np.isinf(db_min):
+                    db_min = db
+                if np.isnan(db_max) or np.isinf(db_max):
+                    db_max = db
+            else:
+                db_min = db_max = db
+            
+            print(f"[Separator] Debug: Raw dB range: {db_min:.1f} to {db_max:.1f} dB (mean: {db:.1f} dB)")
+            
+            return db_min, db_max, db
+            
+        except Exception as e:
+            print(f"[Separator] Raw dB calculation error: {e}")
+            import traceback
+            traceback.print_exc()
+            return -np.inf, -np.inf, -np.inf
+    
     def _calculate_decibel_simple(self, audio: np.ndarray) -> Tuple[float, float, float]:
         """라즈베리 파이 호환 dB 계산 방법"""
         try:
@@ -450,12 +543,12 @@ class SoundSeparator:
                 traceback.print_exc()
                 return np.zeros(L_FIXED, dtype=np.int16)
     
-    def _classify_audio(self, audio: np.ndarray) -> Tuple[str, str, int, float]:
+    def _classify_audio(self, audio_normalized: np.ndarray) -> Tuple[str, str, int, float]:
         """
-        오디오 분류 (실전용)
+        오디오 분류 (실전용) - 정규화된 데이터 사용
         
         Args:
-            audio: 오디오 데이터 (int16 또는 float32)
+            audio_normalized: 정규화된 float32 오디오 데이터 (-1.0 ~ 1.0)
             
         Returns:
             (class_name, sound_type, class_id, confidence)
@@ -465,13 +558,10 @@ class SoundSeparator:
             return "Unknown", "other", 0, 0.0
         
         try:
-            # int16 데이터를 float32로 정규화 (AST 모델용)
-            if audio.dtype == np.int16:
-                audio_float = audio.astype(np.float32) / 32767.0  # -1.0 ~ 1.0 범위로 정규화
-            else:
-                audio_float = audio.astype(np.float32)
+            # 이미 정규화된 데이터를 사용
+            audio_float = audio_normalized.astype(np.float32)
             
-            # 10초로 패딩
+            # 10초로 패딩 (이미 _prepare_audio_for_classification에서 처리됨)
             target_len = int(10.0 * SR)
             if len(audio_float) < target_len:
                 audio_padded = np.zeros(target_len, dtype=np.float32)
@@ -555,24 +645,27 @@ class SoundSeparator:
         print(f"[Separator] Angle: {angle}°")
         
         try:
-            # 오디오 로드
-            audio = self._load_fixed_audio(audio_file)
-            print(f"[Separator] Audio length: {len(audio)/SR:.2f}s")
+            # 오디오 로드 (원본 raw 데이터)
+            audio_raw = self._load_fixed_audio(audio_file)
+            print(f"[Separator] Audio length: {len(audio_raw)/SR:.2f}s")
             
-            # 분류
-            class_name, sound_type, class_id, confidence = self._classify_audio(audio)
+            # 분류용 정규화된 오디오 생성
+            audio_normalized = self._prepare_audio_for_classification(audio_raw)
             
-            # dB 계산 (Sound Trigger와 동일한 방법 사용)
-            db_min, db_max, db_mean = self._calculate_decibel_simple(audio)
+            # 분류 (정규화된 데이터 사용)
+            class_name, sound_type, class_id, confidence = self._classify_audio(audio_normalized)
+            
+            # dB 계산 (원본 raw 데이터 사용 - Sound Trigger와 동일한 방법)
+            db_min, db_max, db_mean = self._calculate_decibel_from_raw(audio_raw)
             
             print(f"[Separator] Classified: {class_name} ({sound_type})")
             print(f"[Separator] Confidence: {confidence:.3f}")
             print(f"[Separator] Decibel: {db_mean:.1f} dB")
             
-            # 분리된 소리 저장
+            # 분리된 소리 저장 (원본 데이터 사용)
             separated_file = None
             if output_dir:
-                separated_file = self._save_separated_audio(audio, class_name, sound_type, output_dir)
+                separated_file = self._save_separated_audio(audio_raw, class_name, sound_type, output_dir)
             
             # 백엔드 전송 (other 타입 제외)
             backend_success = False

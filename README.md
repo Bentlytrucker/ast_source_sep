@@ -2,6 +2,7 @@
 # Cached AST-guided Source Separator
 
 AST(Audio Spectrogram Transformer) 모델을 활용한 지능형 음원 분리 시스템입니다. 주파수 어텐션 맵 캐싱을 통해 AST 모델 호출을 최적화하고, 소리 크기에 따른 적응적 분리 전략을 제공합니다.
+[분리시각화](./debug_pass_1.png)
 
 ## 🎯 주요 특징
 
@@ -171,6 +172,8 @@ is_weak_sound = energy_ratio < 0.1  # 전체 에너지의 10% 미만
 
 3. **메모리 부족**
    - 해결: `--device cpu` 옵션 사용
+  
+     
 
 ## 📝 라이선스
 

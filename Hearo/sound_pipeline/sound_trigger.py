@@ -162,13 +162,21 @@ class SoundTrigger:
         target_samples = int(RECORD_SECONDS * RATE)
         
         try:
-            # Monitor indefinitely until sound is detected
-            while True:
+            # Monitor with a reasonable timeout
+            import time
+            start_time = time.time()
+            timeout = 300  # 5 minutes timeout (longer for testing)
+            
+            while time.time() - start_time < timeout:
                 raw = self.stream.read(CHUNK, exception_on_overflow=False)
                 data_i16 = np.frombuffer(raw, dtype=np.int16)
 
                 # Calculate dB level
                 db_level = self._calculate_db_level(data_i16, self.desired_channels)
+                
+                # Debug: Print dB level occasionally
+                if int(time.time()) % 10 == 0:  # Every 10 seconds
+                    print(f"Current dB level: {db_level:.1f}dB (threshold: {THRESHOLD_DB}dB)")
                 
                 # Check trigger (above 100dB)
                 if not recording and db_level >= THRESHOLD_DB:
@@ -208,6 +216,10 @@ class SoundTrigger:
                         print("Waiting for sounds above 100dB...")
                         
                         return output_filename
+            
+            # Timeout reached
+            print("Monitoring timeout (5 minutes) - no sound detected")
+            return None
 
         except KeyboardInterrupt:
             print("\nMonitoring stopped...")

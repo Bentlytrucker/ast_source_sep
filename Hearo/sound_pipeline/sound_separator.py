@@ -193,31 +193,57 @@ class SoundSeparator:
                 return -np.inf, -np.inf, -np.inf
             
             # 디버그: 오디오 데이터 정보
-           # print(f"[Separator] Debug: Audio data range: {audio.min():.3f} to {audio.max():.3f}")
-            #print(f"[Separator] Debug: Audio data mean: {audio.mean():.3f}, std: {audio.std():.3f}")
+            print(f"[Separator] Debug: Audio data range: {audio.min()} to {audio.max()}")
+            print(f"[Separator] Debug: Audio data mean: {audio.mean():.1f}, std: {audio.std():.1f}")
+            print(f"[Separator] Debug: Audio data type: {audio.dtype}")
             
-            # RMS 계산
-            rms = np.sqrt(np.mean(audio**2))
-            #print(f"[Separator] Debug: RMS: {rms:.6f}")
+            # int16 데이터를 float32로 변환 (Sound Trigger와 동일)
+            if audio.dtype == np.int16:
+                audio_float = audio.astype(np.float32)
+            else:
+                audio_float = audio.astype(np.float32)
             
-            if rms <= 0:
-                print(f"[Separator] Debug: RMS is zero or negative: {rms}")
+            # RMS 계산 (Sound Trigger와 동일한 방식)
+            rms = np.sqrt(np.mean(audio_float**2))
+            print(f"[Separator] Debug: RMS: {rms:.6f}")
+            
+            if rms == 0:
+                print(f"[Separator] Debug: RMS is zero")
                 return -np.inf, -np.inf, -np.inf
             
-            # dB 변환 (20 * log10(rms))
+            # dB 변환 (20 * log10(rms)) - Sound Trigger와 동일
             db = 20 * np.log10(rms)
-            #print(f"[Separator] Debug: Calculated dB: {db:.3f}")
+            print(f"[Separator] Debug: Calculated dB: {db:.3f}")
             
             # 유효한 dB 값인지 확인
             if np.isnan(db) or np.isinf(db):
                 print(f"[Separator] Debug: dB is NaN or inf: {db}")
                 return -np.inf, -np.inf, -np.inf
             
-            # min, max는 mean과 동일하게 설정 (간단하게)
-            return db, db, db
+            # min, max dB 계산 (간단한 방법)
+            audio_abs = np.abs(audio_float)
+            audio_abs = audio_abs[audio_abs > 1e-10]  # 매우 작은 값 제외
+            
+            if len(audio_abs) > 0:
+                db_min = 20 * np.log10(np.min(audio_abs))
+                db_max = 20 * np.log10(np.max(audio_abs))
+                
+                # 유효성 검사
+                if np.isnan(db_min) or np.isinf(db_min):
+                    db_min = db
+                if np.isnan(db_max) or np.isinf(db_max):
+                    db_max = db
+            else:
+                db_min = db_max = db
+            
+            print(f"[Separator] Debug: dB range: {db_min:.1f} to {db_max:.1f} dB (mean: {db:.1f} dB)")
+            
+            return db_min, db_max, db
             
         except Exception as e:
             print(f"[Separator] Simple dB calculation error: {e}")
+            import traceback
+            traceback.print_exc()
             return -np.inf, -np.inf, -np.inf
     
     def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
@@ -289,41 +315,95 @@ class SoundSeparator:
     def _load_fixed_audio(self, path: str) -> np.ndarray:
         """오디오 파일 로드 및 고정 길이로 조정 (원시 int16 값 유지)"""
         try:
-            # torchaudio로 로드 (정규화된 float 값)
-            wav, sro = torchaudio.load(path)
+            import wave
             
-            # 스테레오를 모노로 변환
-            if wav.shape[0] > 1:
-                wav = wav.mean(dim=0, keepdim=True)
-            
-            # 샘플링 레이트 변환
-            if sro != SR:
-                wav = torchaudio.functional.resample(wav, sro, SR)
-            
-            # 정규화된 float 값을 원시 int16 값으로 변환
-            # torchaudio는 -1.0~1.0 범위로 정규화하므로, int16 범위로 복원
-            wav_int16 = (wav * 32767).squeeze().numpy().astype(np.int16)
-            
-            # 데이터 검증
-            if len(wav_int16) == 0:
-                print(f"[Separator] Warning: Empty audio data from {path}")
-                return np.zeros(L_FIXED, dtype=np.int16)
-            
-            # 디버그: 오디오 데이터 범위 확인
-            print(f"[Separator] Debug: Loaded audio range: {wav_int16.min()} to {wav_int16.max()}")
-            print(f"[Separator] Debug: Loaded audio mean: {wav_int16.mean():.1f}, std: {wav_int16.std():.1f}")
-            
-            # 고정 길이로 조정
-            if len(wav_int16) >= L_FIXED:
-                return wav_int16[:L_FIXED]
-            else:
-                out = np.zeros(L_FIXED, dtype=np.int16)
-                out[:len(wav_int16)] = wav_int16
-                return out
+            # wave 모듈로 직접 int16 데이터 읽기 (sound_trigger.py와 동일한 방식)
+            with wave.open(path, 'rb') as wav_file:
+                # WAV 파일 정보 확인
+                channels = wav_file.getnchannels()
+                sample_width = wav_file.getsampwidth()
+                framerate = wav_file.getframerate()
+                n_frames = wav_file.getnframes()
+                
+                print(f"[Separator] Debug: WAV file info - channels: {channels}, sample_width: {sample_width}, framerate: {framerate}, n_frames: {n_frames}")
+                
+                # 오디오 데이터 읽기
+                raw_audio = wav_file.readframes(n_frames)
+                
+                # int16으로 변환
+                if sample_width == 2:  # 16-bit
+                    audio_data = np.frombuffer(raw_audio, dtype=np.int16)
+                elif sample_width == 1:  # 8-bit
+                    audio_data = np.frombuffer(raw_audio, dtype=np.uint8).astype(np.int16) - 128
+                else:
+                    print(f"[Separator] Warning: Unsupported sample width: {sample_width}")
+                    return np.zeros(L_FIXED, dtype=np.int16)
+                
+                # 스테레오를 모노로 변환 (첫 번째 채널만 사용)
+                if channels > 1:
+                    audio_data = audio_data[::channels]  # 첫 번째 채널만 추출
+                
+                # 샘플링 레이트 변환 (간단한 리샘플링)
+                if framerate != SR:
+                    # 간단한 리샘플링 (선형 보간)
+                    ratio = SR / framerate
+                    new_length = int(len(audio_data) * ratio)
+                    audio_data = np.interp(
+                        np.linspace(0, len(audio_data), new_length),
+                        np.arange(len(audio_data)),
+                        audio_data.astype(np.float32)
+                    ).astype(np.int16)
+                
+                # 데이터 검증
+                if len(audio_data) == 0:
+                    print(f"[Separator] Warning: Empty audio data from {path}")
+                    return np.zeros(L_FIXED, dtype=np.int16)
+                
+                # 디버그: 오디오 데이터 범위 확인
+                print(f"[Separator] Debug: Loaded audio range: {audio_data.min()} to {audio_data.max()}")
+                print(f"[Separator] Debug: Loaded audio mean: {audio_data.mean():.1f}, std: {audio_data.std():.1f}")
+                print(f"[Separator] Debug: Loaded audio length: {len(audio_data)} samples ({len(audio_data)/SR:.2f}s)")
+                
+                # 고정 길이로 조정
+                if len(audio_data) >= L_FIXED:
+                    return audio_data[:L_FIXED]
+                else:
+                    out = np.zeros(L_FIXED, dtype=np.int16)
+                    out[:len(audio_data)] = audio_data
+                    return out
                 
         except Exception as e:
             print(f"[Separator] Error loading audio {path}: {e}")
-            return np.zeros(L_FIXED, dtype=np.int16)
+            # 폴백: torchaudio 사용
+            try:
+                print(f"[Separator] Fallback: Using torchaudio for {path}")
+                wav, sro = torchaudio.load(path)
+                
+                # 스테레오를 모노로 변환
+                if wav.shape[0] > 1:
+                    wav = wav.mean(dim=0, keepdim=True)
+                
+                # 샘플링 레이트 변환
+                if sro != SR:
+                    wav = torchaudio.functional.resample(wav, sro, SR)
+                
+                # 정규화된 float 값을 원시 int16 값으로 변환
+                wav_int16 = (wav * 32767).squeeze().numpy().astype(np.int16)
+                
+                print(f"[Separator] Debug: Fallback loaded audio range: {wav_int16.min()} to {wav_int16.max()}")
+                print(f"[Separator] Debug: Fallback loaded audio mean: {wav_int16.mean():.1f}, std: {wav_int16.std():.1f}")
+                
+                # 고정 길이로 조정
+                if len(wav_int16) >= L_FIXED:
+                    return wav_int16[:L_FIXED]
+                else:
+                    out = np.zeros(L_FIXED, dtype=np.int16)
+                    out[:len(wav_int16)] = wav_int16
+                    return out
+                    
+            except Exception as e2:
+                print(f"[Separator] Fallback also failed: {e2}")
+                return np.zeros(L_FIXED, dtype=np.int16)
     
     def _classify_audio(self, audio: np.ndarray) -> Tuple[str, str, int, float]:
         """
@@ -529,8 +609,24 @@ class MockSoundSeparator:
         
         class_name, sound_type, class_id, confidence = random.choice(mock_classes)
         
-        # Mock dB 계산
-        db_mean = random.uniform(60, 120)
+        # Mock dB 계산 (실제 오디오 파일에서 계산)
+        try:
+            import wave
+            with wave.open(audio_file, 'rb') as wav_file:
+                raw_audio = wav_file.readframes(wav_file.getnframes())
+                audio_data = np.frombuffer(raw_audio, dtype=np.int16)
+                if wav_file.getnchannels() > 1:
+                    audio_data = audio_data[::wav_file.getnchannels()]
+                
+                # 실제 dB 계산
+                audio_float = audio_data.astype(np.float32)
+                rms = np.sqrt(np.mean(audio_float**2))
+                if rms > 0:
+                    db_mean = 20 * np.log10(rms)
+                else:
+                    db_mean = random.uniform(60, 120)
+        except:
+            db_mean = random.uniform(60, 120)
         
         print(f"[Separator] Mock classified: {class_name} ({sound_type})")
         print(f"[Separator] Mock confidence: {confidence:.3f}")

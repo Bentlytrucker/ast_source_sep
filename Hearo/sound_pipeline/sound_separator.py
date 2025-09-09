@@ -189,19 +189,28 @@ class SoundSeparator:
         """Sound Trigger와 동일한 dB 계산 방법"""
         try:
             if len(audio) == 0:
+                print(f"[Separator] Debug: Empty audio data")
                 return -np.inf, -np.inf, -np.inf
+            
+            # 디버그: 오디오 데이터 정보
+           # print(f"[Separator] Debug: Audio data range: {audio.min():.3f} to {audio.max():.3f}")
+            #print(f"[Separator] Debug: Audio data mean: {audio.mean():.3f}, std: {audio.std():.3f}")
             
             # RMS 계산
             rms = np.sqrt(np.mean(audio**2))
+            #print(f"[Separator] Debug: RMS: {rms:.6f}")
             
             if rms <= 0:
+                print(f"[Separator] Debug: RMS is zero or negative: {rms}")
                 return -np.inf, -np.inf, -np.inf
             
             # dB 변환 (20 * log10(rms))
             db = 20 * np.log10(rms)
+            #print(f"[Separator] Debug: Calculated dB: {db:.3f}")
             
             # 유효한 dB 값인지 확인
             if np.isnan(db) or np.isinf(db):
+                print(f"[Separator] Debug: dB is NaN or inf: {db}")
                 return -np.inf, -np.inf, -np.inf
             
             # min, max는 mean과 동일하게 설정 (간단하게)
@@ -297,6 +306,10 @@ class SoundSeparator:
             if len(wav) == 0:
                 print(f"[Separator] Warning: Empty audio data from {path}")
                 return np.zeros(L_FIXED, dtype=np.float32)
+            
+            # 디버그: 오디오 데이터 범위 확인
+            print(f"[Separator] Debug: Loaded audio range: {wav.min():.3f} to {wav.max():.3f}")
+            print(f"[Separator] Debug: Loaded audio mean: {wav.mean():.3f}, std: {wav.std():.3f}")
             
             # 고정 길이로 조정
             if len(wav) >= L_FIXED:

@@ -46,25 +46,27 @@ class LEDController:
         self._initialize_device()
     
     def _initialize_device(self):
-        """ReSpeaker USB 장치 초기화"""
+        """ReSpeaker USB 장치 초기화 - 무조건 PixelRing 사용"""
         try:
-            if PixelRing and find:
-                # find 함수를 사용하여 PixelRing 인스턴스 생성
-                self.pixel_ring = find()
+            # PixelRing 모듈이 없으면 강제로 실패
+            if not PixelRing or not find:
+                print("[LED] PixelRing module not available - LED control disabled")
+                self.is_available = False
+                return
+            
+            # find 함수를 사용하여 PixelRing 인스턴스 생성
+            self.pixel_ring = find()
+            
+            if self.pixel_ring:
+                self.is_available = True
+                print(f"[LED] ReSpeaker device found and initialized")
                 
-                if self.pixel_ring:
-                    self.is_available = True
-                    print(f"[LED] ReSpeaker device found and initialized")
-                    
-                    # 초기 설정 - sleep 모드로 시작
-                    self.pixel_ring.set_brightness(0x001)
-                    self.pixel_ring.off()  # sleep 모드로 시작
-                    print("[LED] Started in sleep mode")
-                else:
-                    print("[LED] ReSpeaker device not found")
-                    self.is_available = False
+                # 초기 설정 - sleep 모드로 시작
+                self.pixel_ring.set_brightness(0x001)
+                self.pixel_ring.off()  # sleep 모드로 시작
+                print("[LED] Started in sleep mode")
             else:
-                print("[LED] usb_pixel_ring_v2 module unavailable")
+                print("[LED] ReSpeaker device not found")
                 self.is_available = False
                 
         except Exception as e:
@@ -370,17 +372,16 @@ class MockLEDController:
 
 def create_led_controller() -> LEDController:
     """
-    LED Controller 인스턴스 생성
-    장치가 없으면 Mock 버전 반환
+    LED Controller 인스턴스 생성 - 무조건 실제 PixelRing 사용
     
     Returns:
-        LEDController 또는 MockLEDController 인스턴스
+        LEDController 인스턴스 (실패 시 None)
     """
     controller = LEDController()
     
     if not controller.is_device_available():
-        print("[LED] Real device not available, using mock controller")
-        return MockLEDController()
+        print("[LED] PixelRing not available - LED control disabled")
+        return None
     
     return controller
 

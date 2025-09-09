@@ -119,8 +119,9 @@ class SoundTrigger:
             usable_len = (len(interleaved) // num_channels) * num_channels
             x = interleaved[:usable_len].reshape(-1, num_channels)
 
-            if num_channels >= 6:
-                audio_data = x[:, 5].astype(np.float32)
+            # ReSpeaker 4 Mic Array는 채널 0-3을 사용 (채널 4-5는 비어있을 수 있음)
+            if num_channels >= 4:
+                audio_data = np.mean(x[:, :4], axis=1).astype(np.float32)  # 채널 0-3의 평균
             else:
                 audio_data = np.mean(x[:, :min(num_channels, 4)], axis=1).astype(np.float32)
 

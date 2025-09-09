@@ -128,9 +128,7 @@ class SoundTrigger:
         # RMS 계산
         rms = np.sqrt(np.mean(audio_data**2))
         
-        # 디버깅: RMS 값 확인 (간소화)
-        if len(audio_data) > 0 and rms > 0:
-            print(f"Debug: RMS: {rms:.2f}, dB: {20 * np.log10(rms):.1f}")
+        # Debug output removed
         
         if rms == 0:
             return -np.inf
@@ -189,11 +187,7 @@ class SoundTrigger:
                 # Calculate dB level
                 db_level = self._calculate_db_level(data_i16, self.desired_channels)
                 
-                # Debug: Print dB level occasionally
-                if int(time.time()) % 10 == 0:  # Every 10 seconds
-                    print(f"Current dB level: {db_level:.1f}dB (threshold: {THRESHOLD_DB}dB)")
-                    print(f"Audio data length: {len(data_i16)}, Channels: {self.desired_channels}")
-                    print(f"Data range: {np.min(data_i16)} to {np.max(data_i16)}")
+                # Debug output removed for cleaner operation
                 
                 # Check trigger (above 100dB)
                 if not recording and db_level >= THRESHOLD_DB:

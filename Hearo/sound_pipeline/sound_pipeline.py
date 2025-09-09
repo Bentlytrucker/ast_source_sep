@@ -83,6 +83,8 @@ class SoundPipeline:
         # Initialize LED Controller
         print("4. Initializing LED Controller...")
         self.led_controller = create_led_controller()
+        if self.led_controller is None:
+            print("⚠️ LED Controller not available - LED control disabled")
         
         print("=== Initialization Complete ===")
         self._print_status()

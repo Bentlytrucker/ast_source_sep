@@ -65,26 +65,26 @@ class SoundPipeline:
         }
     
     def _initialize_components(self):
-        """모든 컴포넌트 초기화"""
-        print("=== Sound Pipeline 초기화 ===")
+        """Initialize all components"""
+        print("=== Sound Pipeline Initialization ===")
         
-        # Sound Trigger 초기화 (LED 컨트롤러와 연결)
-        print("1. Sound Trigger 초기화...")
+        # Initialize Sound Trigger (connected to LED controller)
+        print("1. Initializing Sound Trigger...")
         self.sound_trigger = SoundTrigger(os.path.join(self.output_dir, "recordings"), self.led_controller)
         
-        # DOA Calculator 초기화
-        print("2. DOA Calculator 초기화...")
+        # Initialize DOA Calculator
+        print("2. Initializing DOA Calculator...")
         self.doa_calculator = create_doa_calculator()
         
-        # Sound Separator 초기화
-        print("3. Sound Separator 초기화...")
+        # Initialize Sound Separator
+        print("3. Initializing Sound Separator...")
         self.sound_separator = create_sound_separator(self.model_name, self.device, self.backend_url)
         
-        # LED Controller 초기화
-        print("4. LED Controller 초기화...")
+        # Initialize LED Controller
+        print("4. Initializing LED Controller...")
         self.led_controller = create_led_controller()
         
-        print("=== 초기화 완료 ===")
+        print("=== Initialization Complete ===")
         self._print_status()
     
     def _print_status(self):
@@ -109,14 +109,14 @@ class SoundPipeline:
         print(f"\n🎵 Processing: {os.path.basename(audio_file)}")
         
         try:
-            # 1. 각도 계산
+            # 1. Calculate DOA
             print("📍 Calculating direction...")
             angle = self.doa_calculator.get_direction_with_retry(max_retries=3)
             if angle is None:
-                angle = 0  # 기본값
+                angle = 0  # Default value
             print(f"📍 Direction: {angle}°")
             
-            # 2. 음원 분리 및 분류
+            # 2. Sound separation and classification
             print("🔍 Analyzing sound...")
             separated_output_dir = os.path.join(self.output_dir, "separated")
             result = self.sound_separator.process_audio(audio_file, angle, separated_output_dir)
@@ -125,12 +125,12 @@ class SoundPipeline:
                 print(f"❌ Processing failed: {result.get('error', 'Unknown error')}")
                 return result
             
-            # 3. LED 출력 (5초 유지, danger시 10초 깜빡임)
+            # 3. LED control (5 seconds duration, 10 seconds blinking for danger)
             print("💡 Setting LED...")
             sound_type = result["sound_type"]
             led_success = self.led_controller.set_sound_type_color(sound_type)
             
-            # 4. 통계 업데이트
+            # 4. Update statistics
             self.stats["total_processed"] += 1
             if result["success"]:
                 self.stats["successful_processing"] += 1
@@ -138,7 +138,7 @@ class SoundPipeline:
             else:
                 self.stats["failed_processing"] += 1
             
-            # 5. 결과 출력
+            # 5. Print results
             print(f"✅ Processing completed:")
             print(f"   Class: {result['class_name']}")
             print(f"   Type: {result['sound_type']}")
@@ -159,73 +159,73 @@ class SoundPipeline:
             return {"success": False, "error": str(e)}
     
     def _worker_thread_func(self):
-        """워커 스레드 함수"""
+        """Worker thread function"""
         while self.is_running:
             try:
-                # 큐에서 작업 가져오기 (타임아웃 1초)
+                # Get work from queue (1 second timeout)
                 audio_file = self.processing_queue.get(timeout=1.0)
                 
-                if audio_file is None:  # 종료 신호
+                if audio_file is None:  # Exit signal
                     break
                 
-                # 오디오 파일 처리
+                # Process audio file
                 self._process_audio_file(audio_file)
                 
-                # 작업 완료 표시
+                # Mark task as done
                 self.processing_queue.task_done()
                 
             except queue.Empty:
-                # 타임아웃 - 계속 실행
+                # Timeout - continue running
                 continue
             except Exception as e:
                 print(f"❌ Worker thread error: {e}")
                 continue
     
     def _start_worker_thread(self):
-        """워커 스레드 시작"""
+        """Start worker thread"""
         self.worker_thread = threading.Thread(target=self._worker_thread_func, daemon=True)
         self.worker_thread.start()
         print("🔄 Worker thread started")
     
     def _stop_worker_thread(self):
-        """워커 스레드 중지"""
+        """Stop worker thread"""
         if self.worker_thread and self.worker_thread.is_alive():
-            # 종료 신호 전송
+            # Send exit signal
             self.processing_queue.put(None)
             self.worker_thread.join(timeout=5.0)
             print("🔄 Worker thread stopped")
     
     def start(self):
-        """파이프라인 시작"""
+        """Start pipeline"""
         if self.is_running:
             print("⚠️ Pipeline is already running")
             return
         
         print("🚀 Starting Sound Pipeline...")
         
-        # 컴포넌트 초기화
+        # Initialize components
         self._initialize_components()
         
-        # 워커 스레드 시작
+        # Start worker thread
         self.is_running = True
         self._start_worker_thread()
         
-        # LED 초기화 - sleep 모드로 시작
-        print("💤 micarray를 sleep 모드로 시작합니다...")
-        self.led_controller.turn_off()  # sleep 모드
+        # LED initialization - start in sleep mode
+        print("💤 Starting micarray in sleep mode...")
+        self.led_controller.turn_off()  # sleep mode
         
         print("✅ Sound Pipeline started successfully!")
         print("📡 Monitoring for sounds above 100dB...")
         print("Press Ctrl+C to stop")
         
         try:
-            # 메인 루프 - 소리 감지 및 처리
+            # Main loop - sound detection and processing
             while self.is_running:
-                # 소리 감지 대기
+                # Wait for sound detection
                 recorded_file = self.sound_trigger.start_monitoring()
                 
                 if recorded_file and self.is_running:
-                    # 처리 큐에 추가
+                    # Add to processing queue
                     self.processing_queue.put(recorded_file)
                     print(f"📝 Added to processing queue: {os.path.basename(recorded_file)}")
                 
@@ -234,31 +234,31 @@ class SoundPipeline:
             self.stop()
     
     def stop(self):
-        """파이프라인 중지"""
+        """Stop pipeline"""
         if not self.is_running:
             print("⚠️ Pipeline is not running")
             return
         
         print("🛑 Stopping Sound Pipeline...")
         
-        # 실행 중지
+        # Stop running
         self.is_running = False
         
-        # 워커 스레드 중지
+        # Stop worker thread
         self._stop_worker_thread()
         
-        # LED 끄기
+        # Turn off LED
         if self.led_controller:
             self.led_controller.turn_off()
         
-        # 통계 출력
+        # Print statistics
         self._print_statistics()
         
         print("✅ Sound Pipeline stopped")
     
     def _print_statistics(self):
-        """통계 출력"""
-        print("\n=== 처리 통계 ===")
+        """Print statistics"""
+        print("\n=== Processing Statistics ===")
         print(f"Total processed: {self.stats['total_processed']}")
         print(f"Successful: {self.stats['successful_processing']}")
         print(f"Failed: {self.stats['failed_processing']}")
@@ -273,11 +273,11 @@ class SoundPipeline:
         print("================\n")
     
     def cleanup(self):
-        """리소스 정리"""
+        """Clean up resources"""
         if self.is_running:
             self.stop()
         
-        # 컴포넌트 정리
+        # Clean up components
         if self.sound_trigger:
             self.sound_trigger.cleanup()
         if self.doa_calculator:
@@ -295,7 +295,7 @@ class SoundPipeline:
 
 
 def main():
-    """메인 함수"""
+    """Main function"""
     parser = argparse.ArgumentParser(description="Sound Pipeline - Real-time Sound Detection and Analysis")
     parser.add_argument("--output", "-o", default="pipeline_output", help="Output directory")
     parser.add_argument("--model", "-m", default="MIT/ast-finetuned-audioset-10-10-0.4593", help="AST model name")

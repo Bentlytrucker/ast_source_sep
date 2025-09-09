@@ -151,7 +151,16 @@ class SoundSeparator:
     
     def _calculate_decibel(self, audio: np.ndarray) -> Tuple[float, float, float]:
         """dB 레벨 계산"""
+        # 오디오 데이터 검증
+        if len(audio) == 0:
+            return -np.inf, -np.inf, -np.inf
+        
+        # RMS 계산
         rms = np.sqrt(np.mean(audio**2))
+        
+        # 디버깅: 오디오 데이터 상태 확인
+        #print(f"[Separator] Audio data: len={len(audio)}, range={np.min(audio):.3f} to {np.max(audio):.3f}, RMS={rms:.3f}")
+        
         if rms == 0:
             return -np.inf, -np.inf, -np.inf
         
@@ -161,6 +170,7 @@ class SoundSeparator:
             
             # 유효한 dB 값인지 확인
             if np.isnan(db) or np.isinf(db):
+                print(f"[Separator] Invalid dB value: {db}")
                 return -np.inf, -np.inf, -np.inf
         else:
             return -np.inf, -np.inf, -np.inf
@@ -175,6 +185,7 @@ class SoundSeparator:
         else:
             db_min = db_max = db
         
+        print(f"[Separator] Calculated dB: min={db_min:.1f}, max={db_max:.1f}, mean={db:.1f}")
         return db_min, db_max, db
     
     def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:

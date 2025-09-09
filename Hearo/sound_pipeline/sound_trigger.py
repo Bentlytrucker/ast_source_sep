@@ -126,6 +126,14 @@ class SoundTrigger:
 
         # RMS 계산
         rms = np.sqrt(np.mean(audio_data**2))
+        
+        # 디버깅: RMS 값 확인
+        if len(audio_data) > 0:
+            print(f"Debug: audio_data range: {np.min(audio_data)} to {np.max(audio_data)}")
+            print(f"Debug: audio_data mean: {np.mean(audio_data)}")
+            print(f"Debug: audio_data std: {np.std(audio_data)}")
+            print(f"Debug: RMS: {rms}")
+        
         if rms == 0:
             return -np.inf
         

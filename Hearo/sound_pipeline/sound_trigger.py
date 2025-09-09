@@ -149,12 +149,12 @@ class SoundTrigger:
 
     def start_monitoring(self) -> Optional[str]:
         """
-        소리 모니터링 시작
+        Start sound monitoring
         
         Returns:
-            녹음된 파일 경로 (트리거 발생 시), None (트리거 없음)
+            Recorded file path (when triggered), None (no trigger)
         """
-        print("100dB 이상 소리를 대기 중입니다... (Ctrl+C로 종료)")
+        print("Waiting for sounds above 100dB... (Press Ctrl+C to stop)")
         
         recording = False
         frames_bytes = []
@@ -162,27 +162,27 @@ class SoundTrigger:
         target_samples = int(RECORD_SECONDS * RATE)
         
         try:
-            # 무한 루프 대신 짧은 시간 동안만 모니터링
+            # Monitor for a short time instead of infinite loop
             import time
             start_time = time.time()
-            timeout = 30  # 30초 타임아웃
+            timeout = 30  # 30 second timeout
             
             while time.time() - start_time < timeout:
                 raw = self.stream.read(CHUNK, exception_on_overflow=False)
                 data_i16 = np.frombuffer(raw, dtype=np.int16)
 
-                # dB 레벨 계산
+                # Calculate dB level
                 db_level = self._calculate_db_level(data_i16, self.desired_channels)
                 
-                # 트리거 체크 (100dB 이상)
+                # Check trigger (above 100dB)
                 if not recording and db_level >= THRESHOLD_DB:
-                    print(f"소리 감지! ({db_level:.1f}dB) micarray wake up...")
+                    print(f"Sound detected! ({db_level:.1f}dB) micarray wake up...")
                     
-                    # LED 컨트롤러가 있으면 wake up 실행
+                    # Execute wake up if LED controller is available
                     if self.led_controller:
                         self.led_controller.wakeup_from_sleep()
                     
-                    print("녹음 시작...")
+                    print("Recording started...")
                     recording = True
                     frames_bytes = []
                     samples_collected = 0
@@ -208,24 +208,24 @@ class SoundTrigger:
                         wf.writeframes(b''.join(frames_bytes))
                         wf.close()
 
-                        print(f"저장 완료: {output_filename}")
-                        print("100dB 이상 소리를 다시 대기 중...")
+                        print(f"Saved: {output_filename}")
+                        print("Waiting for sounds above 100dB...")
                         
                         return output_filename
             
-            # 타임아웃 시 None 반환
-            print("모니터링 타임아웃...")
+            # Return None on timeout
+            print("Monitoring timeout...")
             return None
 
         except KeyboardInterrupt:
-            print("\n모니터링 종료...")
+            print("\nMonitoring stopped...")
             return None
         except Exception as e:
-            print(f"오류 발생: {e}")
+            print(f"Error occurred: {e}")
             return None
 
     def cleanup(self):
-        """리소스 정리"""
+        """Clean up resources"""
         try:
             if self.stream:
                 self.stream.stop_stream()

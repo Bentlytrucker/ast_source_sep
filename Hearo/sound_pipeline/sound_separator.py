@@ -185,6 +185,32 @@ class SoundSeparator:
             print(f"[Separator] dB calculation error: {e}")
             return -np.inf, -np.inf, -np.inf
     
+    def _calculate_decibel_simple(self, audio: np.ndarray) -> Tuple[float, float, float]:
+        """Sound Trigger와 동일한 dB 계산 방법"""
+        try:
+            if len(audio) == 0:
+                return -np.inf, -np.inf, -np.inf
+            
+            # RMS 계산
+            rms = np.sqrt(np.mean(audio**2))
+            
+            if rms <= 0:
+                return -np.inf, -np.inf, -np.inf
+            
+            # dB 변환 (20 * log10(rms))
+            db = 20 * np.log10(rms)
+            
+            # 유효한 dB 값인지 확인
+            if np.isnan(db) or np.isinf(db):
+                return -np.inf, -np.inf, -np.inf
+            
+            # min, max는 mean과 동일하게 설정 (간단하게)
+            return db, db, db
+            
+        except Exception as e:
+            print(f"[Separator] Simple dB calculation error: {e}")
+            return -np.inf, -np.inf, -np.inf
+    
     def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
         """
         Send results to backend (including angle information)
@@ -384,8 +410,8 @@ class SoundSeparator:
             # 분류
             class_name, sound_type, class_id, confidence = self._classify_audio(audio)
             
-            # dB 계산
-            db_min, db_max, db_mean = self._calculate_decibel(audio)
+            # dB 계산 (Sound Trigger와 동일한 방법 사용)
+            db_min, db_max, db_mean = self._calculate_decibel_simple(audio)
             
             print(f"[Separator] Classified: {class_name} ({sound_type})")
             print(f"[Separator] Confidence: {confidence:.3f}")

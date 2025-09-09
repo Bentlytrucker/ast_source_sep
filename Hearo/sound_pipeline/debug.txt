@@ -1,0 +1,37 @@
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (71.6dB) micarray wake up...
+Recording started...
+[LED] Color turned off after 5.0s
+✅ Processing completed:
+   Class: Silence
+   Type: other
+   Confidence: 0.644
+   Angle: 76°
+   Decibel: -inf dB
+   Backend: ✅
+   LED: ✅
+   Separated: separated_1757462030_Silence_other.wav
+
+🎵 Processing: triggered_recording_1757462016.wav
+📍 Calculating direction...
+📍 Direction: 90°
+🔍 Analyzing sound...
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757462016.wav
+[Separator] Angle: 90°
+[Separator] Debug: Loading audio file: pipeline_output/recordings/triggered_recording_1757462016.wav
+[Separator] Debug: WAV file info - channels: 1, sample_width: 2, framerate: 16000, n_frames: 65536
+[Separator] Debug: Raw audio length: 131072 bytes
+[Separator] Debug: Converted to int16 array, length: 65536
+[Separator] Debug: Raw audio data range: 0 to 0
+[Separator] Debug: Raw audio data mean: 0.0, std: 0.0
+[Separator] Debug: Non-zero samples: 0 / 65536
+[Separator] ❌ CRITICAL: All audio data is zero!
+[Separator] Debug: This indicates a problem with the WAV file or loading process
+[Separator] Debug: File: pipeline_output/recordings/triggered_recording_1757462016.wav
+[Separator] Debug: Channels: 1, Sample width: 2, Framerate: 16000
+[Separator] Debug: Raw audio bytes: 131072
+[Separator] Debug: First 20 bytes: b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+[Separator] Debug: Last 20 bytes: b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+[Separator] Debug: File size: 131116 bytes
+[Separator] Debug: Non-zero samples: 0 / 65536
+[Separator] Audio length: 4.10s

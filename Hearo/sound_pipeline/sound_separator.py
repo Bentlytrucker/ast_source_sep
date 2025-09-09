@@ -114,10 +114,10 @@ class SoundSeparator:
         self._initialize_model()
     
     def _initialize_model(self):
-        """AST 모델 초기화"""
+        """AST 모델 초기화 (실전용)"""
         try:
             if ASTFeatureExtractor is None or ASTForAudioClassification is None:
-                print("[Separator] Transformers not available, using mock mode")
+                print("[Separator] ❌ Transformers not available - 실전 모드에서는 필수입니다!")
                 self.is_available = False
                 return
             
@@ -132,10 +132,11 @@ class SoundSeparator:
             self.mel_fb_m2f = torchaudio.transforms.MelScale(n_mels=N_MELS, sample_rate=SR, n_stft=N_FFT//2+1).fb
             
             self.is_available = True
-            print("[Separator] AST model loaded successfully")
+            print("[Separator] ✅ AST model loaded successfully")
             
         except Exception as e:
-            print(f"[Separator] Model loading error: {e}")
+            print(f"[Separator] ❌ Model loading error: {e}")
+            print("[Separator] 실전 모드에서는 모델 로딩이 필수입니다!")
             self.is_available = False
     
     def _get_sound_type(self, class_id: int) -> str:
@@ -186,7 +187,7 @@ class SoundSeparator:
             return -np.inf, -np.inf, -np.inf
     
     def _calculate_decibel_simple(self, audio: np.ndarray) -> Tuple[float, float, float]:
-        """Sound Trigger와 동일한 dB 계산 방법"""
+        """라즈베리 파이 호환 dB 계산 방법"""
         try:
             if len(audio) == 0:
                 print(f"[Separator] Debug: Empty audio data")
@@ -196,19 +197,34 @@ class SoundSeparator:
             print(f"[Separator] Debug: Audio data range: {audio.min()} to {audio.max()}")
             print(f"[Separator] Debug: Audio data mean: {audio.mean():.1f}, std: {audio.std():.1f}")
             print(f"[Separator] Debug: Audio data type: {audio.dtype}")
+            print(f"[Separator] Debug: Audio data shape: {audio.shape}")
             
-            # int16 데이터를 float32로 변환 (Sound Trigger와 동일)
+            # 안전한 자료형 변환 (라즈베리 파이 호환)
             if audio.dtype == np.int16:
-                audio_float = audio.astype(np.float32)
+                # int16을 float64로 변환하여 정밀도 향상
+                audio_float = audio.astype(np.float64)
+                print(f"[Separator] Debug: Converted int16 to float64")
+            elif audio.dtype == np.float32:
+                audio_float = audio.astype(np.float64)
+                print(f"[Separator] Debug: Converted float32 to float64")
+            elif audio.dtype == np.float64:
+                audio_float = audio.copy()
+                print(f"[Separator] Debug: Using float64 directly")
             else:
-                audio_float = audio.astype(np.float32)
+                audio_float = audio.astype(np.float64)
+                print(f"[Separator] Debug: Converted {audio.dtype} to float64")
+            
+            # 데이터 검증
+            if np.all(audio_float == 0):
+                print(f"[Separator] Debug: All audio data is zero")
+                return -np.inf, -np.inf, -np.inf
             
             # RMS 계산 (Sound Trigger와 동일한 방식)
             rms = np.sqrt(np.mean(audio_float**2))
             print(f"[Separator] Debug: RMS: {rms:.6f}")
             
-            if rms == 0:
-                print(f"[Separator] Debug: RMS is zero")
+            if rms <= 0:
+                print(f"[Separator] Debug: RMS is zero or negative: {rms}")
                 return -np.inf, -np.inf, -np.inf
             
             # dB 변환 (20 * log10(rms)) - Sound Trigger와 동일
@@ -220,13 +236,15 @@ class SoundSeparator:
                 print(f"[Separator] Debug: dB is NaN or inf: {db}")
                 return -np.inf, -np.inf, -np.inf
             
-            # min, max dB 계산 (간단한 방법)
+            # min, max dB 계산 (안전한 방법)
             audio_abs = np.abs(audio_float)
-            audio_abs = audio_abs[audio_abs > 1e-10]  # 매우 작은 값 제외
+            # 0이 아닌 값들만 사용
+            non_zero_mask = audio_abs > 1e-10
+            audio_abs_nonzero = audio_abs[non_zero_mask]
             
-            if len(audio_abs) > 0:
-                db_min = 20 * np.log10(np.min(audio_abs))
-                db_max = 20 * np.log10(np.max(audio_abs))
+            if len(audio_abs_nonzero) > 0:
+                db_min = 20 * np.log10(np.min(audio_abs_nonzero))
+                db_max = 20 * np.log10(np.max(audio_abs_nonzero))
                 
                 # 유효성 검사
                 if np.isnan(db_min) or np.isinf(db_min):
@@ -237,6 +255,11 @@ class SoundSeparator:
                 db_min = db_max = db
             
             print(f"[Separator] Debug: dB range: {db_min:.1f} to {db_max:.1f} dB (mean: {db:.1f} dB)")
+            
+            # 최종 검증
+            if np.isnan(db_min) or np.isinf(db_min) or np.isnan(db_max) or np.isinf(db_max) or np.isnan(db) or np.isinf(db):
+                print(f"[Separator] Debug: Final validation failed - returning -inf")
+                return -np.inf, -np.inf, -np.inf
             
             return db_min, db_max, db
             
@@ -313,11 +336,14 @@ class SoundSeparator:
             return False
     
     def _load_fixed_audio(self, path: str) -> np.ndarray:
-        """오디오 파일 로드 및 고정 길이로 조정 (원시 int16 값 유지)"""
+        """오디오 파일 로드 및 고정 길이로 조정 (라즈베리 파이 호환)"""
         try:
             import wave
+            import struct
             
-            # wave 모듈로 직접 int16 데이터 읽기 (sound_trigger.py와 동일한 방식)
+            print(f"[Separator] Debug: Loading audio file: {path}")
+            
+            # wave 모듈로 직접 int16 데이터 읽기 (라즈베리 파이 호환)
             with wave.open(path, 'rb') as wav_file:
                 # WAV 파일 정보 확인
                 channels = wav_file.getnchannels()
@@ -329,40 +355,54 @@ class SoundSeparator:
                 
                 # 오디오 데이터 읽기
                 raw_audio = wav_file.readframes(n_frames)
+                print(f"[Separator] Debug: Raw audio length: {len(raw_audio)} bytes")
                 
-                # int16으로 변환
+                # 안전한 int16 변환 (엔디안 문제 해결)
                 if sample_width == 2:  # 16-bit
-                    audio_data = np.frombuffer(raw_audio, dtype=np.int16)
+                    # struct를 사용하여 안전하게 변환
+                    if len(raw_audio) % 2 != 0:
+                        print(f"[Separator] Warning: Odd number of bytes, truncating")
+                        raw_audio = raw_audio[:-1]
+                    
+                    # struct.unpack을 사용하여 엔디안 문제 해결
+                    audio_data = np.array(struct.unpack(f'<{len(raw_audio)//2}h', raw_audio), dtype=np.int16)
+                    print(f"[Separator] Debug: Converted to int16 array, length: {len(audio_data)}")
+                    
                 elif sample_width == 1:  # 8-bit
                     audio_data = np.frombuffer(raw_audio, dtype=np.uint8).astype(np.int16) - 128
+                    print(f"[Separator] Debug: Converted 8-bit to int16, length: {len(audio_data)}")
                 else:
                     print(f"[Separator] Warning: Unsupported sample width: {sample_width}")
                     return np.zeros(L_FIXED, dtype=np.int16)
-                
-                # 스테레오를 모노로 변환 (첫 번째 채널만 사용)
-                if channels > 1:
-                    audio_data = audio_data[::channels]  # 첫 번째 채널만 추출
-                
-                # 샘플링 레이트 변환 (간단한 리샘플링)
-                if framerate != SR:
-                    # 간단한 리샘플링 (선형 보간)
-                    ratio = SR / framerate
-                    new_length = int(len(audio_data) * ratio)
-                    audio_data = np.interp(
-                        np.linspace(0, len(audio_data), new_length),
-                        np.arange(len(audio_data)),
-                        audio_data.astype(np.float32)
-                    ).astype(np.int16)
                 
                 # 데이터 검증
                 if len(audio_data) == 0:
                     print(f"[Separator] Warning: Empty audio data from {path}")
                     return np.zeros(L_FIXED, dtype=np.int16)
                 
+                # 스테레오를 모노로 변환 (첫 번째 채널만 사용)
+                if channels > 1:
+                    audio_data = audio_data[::channels]  # 첫 번째 채널만 추출
+                    print(f"[Separator] Debug: Converted stereo to mono, new length: {len(audio_data)}")
+                
+                # 샘플링 레이트 변환 (간단한 리샘플링)
+                if framerate != SR:
+                    print(f"[Separator] Debug: Resampling from {framerate}Hz to {SR}Hz")
+                    # 간단한 리샘플링 (선형 보간)
+                    ratio = SR / framerate
+                    new_length = int(len(audio_data) * ratio)
+                    audio_data = np.interp(
+                        np.linspace(0, len(audio_data), new_length),
+                        np.arange(len(audio_data)),
+                        audio_data.astype(np.float64)  # float64 사용으로 정밀도 향상
+                    ).astype(np.int16)
+                    print(f"[Separator] Debug: Resampled to length: {len(audio_data)}")
+                
                 # 디버그: 오디오 데이터 범위 확인
-                print(f"[Separator] Debug: Loaded audio range: {audio_data.min()} to {audio_data.max()}")
-                print(f"[Separator] Debug: Loaded audio mean: {audio_data.mean():.1f}, std: {audio_data.std():.1f}")
-                print(f"[Separator] Debug: Loaded audio length: {len(audio_data)} samples ({len(audio_data)/SR:.2f}s)")
+                print(f"[Separator] Debug: Final audio range: {audio_data.min()} to {audio_data.max()}")
+                print(f"[Separator] Debug: Final audio mean: {audio_data.mean():.1f}, std: {audio_data.std():.1f}")
+                print(f"[Separator] Debug: Final audio length: {len(audio_data)} samples ({len(audio_data)/SR:.2f}s)")
+                print(f"[Separator] Debug: Final audio dtype: {audio_data.dtype}")
                 
                 # 고정 길이로 조정
                 if len(audio_data) >= L_FIXED:
@@ -374,6 +414,9 @@ class SoundSeparator:
                 
         except Exception as e:
             print(f"[Separator] Error loading audio {path}: {e}")
+            import traceback
+            traceback.print_exc()
+            
             # 폴백: torchaudio 사용
             try:
                 print(f"[Separator] Fallback: Using torchaudio for {path}")
@@ -403,11 +446,13 @@ class SoundSeparator:
                     
             except Exception as e2:
                 print(f"[Separator] Fallback also failed: {e2}")
+                import traceback
+                traceback.print_exc()
                 return np.zeros(L_FIXED, dtype=np.int16)
     
     def _classify_audio(self, audio: np.ndarray) -> Tuple[str, str, int, float]:
         """
-        오디오 분류 (간단한 버전)
+        오디오 분류 (실전용)
         
         Args:
             audio: 오디오 데이터 (int16 또는 float32)
@@ -416,8 +461,8 @@ class SoundSeparator:
             (class_name, sound_type, class_id, confidence)
         """
         if not self.is_available:
-            # Mock 분류 결과
-            return "Unknown", "other", 0, 0.5
+            print("[Separator] ❌ Model not available - 실전 모드에서는 모델이 필수입니다!")
+            return "Unknown", "other", 0, 0.0
         
         try:
             # int16 데이터를 float32로 정규화 (AST 모델용)
@@ -449,7 +494,7 @@ class SoundSeparator:
             return class_name, sound_type, predicted_class_id, confidence
             
         except Exception as e:
-            print(f"[Separator] Classification error: {e}")
+            print(f"[Separator] ❌ Classification error: {e}")
             return "Unknown", "other", 0, 0.0
     
     def _save_separated_audio(self, audio: np.ndarray, class_name: str, sound_type: str, output_dir: str) -> str:
@@ -582,187 +627,12 @@ class SoundSeparator:
         self.cleanup()
 
 
-class MockSoundSeparator:
-    """
-    모델이 없을 때 사용하는 Mock 클래스
-    테스트용으로 랜덤 분류 결과 반환
-    """
-    
-    def __init__(self, backend_url: str = BACKEND_URL):
-        self.backend_url = backend_url
-        self.is_available = False
-        print("[Separator] Mock Sound Separator initialized (no real model)")
-    
-    def process_audio(self, audio_file: str, angle: int, output_dir: str = None) -> Dict[str, Any]:
-        """Mock 처리 결과 반환"""
-        import random
-        
-        # Mock 분류 결과
-        mock_classes = [
-            ("Gunshot", "danger", 396, 0.85),
-            ("Scream", "danger", 397, 0.90),
-            ("Car horn", "warning", 288, 0.75),
-            ("Dog bark", "warning", 364, 0.80),
-            ("Help", "help", 23, 0.70),
-            ("Unknown", "other", 0, 0.50)
-        ]
-        
-        class_name, sound_type, class_id, confidence = random.choice(mock_classes)
-        
-        # Mock dB 계산 (실제 오디오 파일에서 계산)
-        try:
-            import wave
-            with wave.open(audio_file, 'rb') as wav_file:
-                raw_audio = wav_file.readframes(wav_file.getnframes())
-                audio_data = np.frombuffer(raw_audio, dtype=np.int16)
-                if wav_file.getnchannels() > 1:
-                    audio_data = audio_data[::wav_file.getnchannels()]
-                
-                # 실제 dB 계산
-                audio_float = audio_data.astype(np.float32)
-                rms = np.sqrt(np.mean(audio_float**2))
-                if rms > 0:
-                    db_mean = 20 * np.log10(rms)
-                else:
-                    db_mean = random.uniform(60, 120)
-        except:
-            db_mean = random.uniform(60, 120)
-        
-        print(f"[Separator] Mock classified: {class_name} ({sound_type})")
-        print(f"[Separator] Mock confidence: {confidence:.3f}")
-        print(f"[Separator] Mock decibel: {db_mean:.1f} dB")
-        
-        # Mock 분리된 소리 저장
-        separated_file = None
-        if output_dir:
-            separated_file = self._save_separated_audio_mock(audio_file, class_name, sound_type, output_dir)
-        
-        # Mock 백엔드 전송 (실제 전송 시도)
-        backend_success = True
-        if sound_type != "other":
-            print(f"[Separator] Mock backend send: {sound_type} at {angle}°")
-            # 실제 백엔드 전송 시도
-            backend_success = self._send_to_backend_mock(sound_type, class_name, db_mean, angle)
-        
-        return {
-            "success": True,
-            "class_name": class_name,
-            "sound_type": sound_type,
-            "class_id": class_id,
-            "confidence": confidence,
-            "angle": angle,
-            "decibel": {
-                "min": db_mean - 10,
-                "max": db_mean + 10,
-                "mean": db_mean
-            },
-            "backend_success": backend_success,
-            "audio_file": audio_file,
-            "separated_file": separated_file
-        }
-    
-    def _save_separated_audio_mock(self, audio_file: str, class_name: str, sound_type: str, output_dir: str) -> str:
-        """Mock 분리된 오디오 저장"""
-        try:
-            import shutil
-            import time
-            
-            # 출력 디렉토리 생성
-            os.makedirs(output_dir, exist_ok=True)
-            
-            # 파일명 생성
-            timestamp = int(time.time())
-            safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-            safe_class_name = safe_class_name.replace(' ', '_')
-            
-            filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}.wav"
-            filepath = os.path.join(output_dir, filename)
-            
-            # 원본 파일을 복사 (Mock)
-            shutil.copy2(audio_file, filepath)
-            
-            print(f"[Separator] Mock separated audio saved: {filename}")
-            return filepath
-            
-        except Exception as e:
-            print(f"[Separator] Mock error saving separated audio: {e}")
-            return None
-    
-    def _send_to_backend_mock(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
-        """Mock backend transmission (actually tries to send)"""
-        try:
-            data = {
-                "user_id": USER_ID,
-                "sound_type": sound_type,
-                "sound_detail": sound_detail,
-                "angle": angle,
-                "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "sound_icon": "string",
-                "location_image_url": "string",
-                "decibel": float(decibel),
-            }
-            
-            headers = {
-                'Content-Type': 'application/json',
-                'User-Agent': 'SoundPipeline/1.0'
-            }
-            
-            print(f"🔄 Mock sending to backend: {self.backend_url}")
-            print(f"📤 Mock data: {data}")
-            
-            # Disable SSL warnings for testing
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            response = requests.post(
-                self.backend_url, 
-                json=data, 
-                headers=headers,
-                timeout=10.0,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                print(f"✅ Mock sent to backend: {sound_detail} ({sound_type}) at {angle}°")
-                return True
-            else:
-                print(f"❌ Mock backend error: {response.status_code}")
-                print(f"❌ Mock response: {response.text}")
-                return False
-                
-        except requests.exceptions.ConnectTimeout:
-            print(f"❌ Mock backend connection timeout: {self.backend_url}")
-            return False
-        except requests.exceptions.ConnectionError as e:
-            print(f"❌ Mock backend connection error: {e}")
-            return False
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Mock backend request error: {e}")
-            return False
-        except Exception as e:
-            print(f"❌ Mock unexpected error sending to backend: {e}")
-            return False
-    
-    def is_model_available(self) -> bool:
-        """Mock은 항상 사용 가능"""
-        return True
-    
-    def cleanup(self):
-        """Mock 정리"""
-        pass
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
 
 
 def create_sound_separator(model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
                           device: str = "auto", backend_url: str = BACKEND_URL) -> SoundSeparator:
     """
-    Sound Separator 인스턴스 생성
-    모델이 없으면 Mock 버전 반환
+    Sound Separator 인스턴스 생성 (실전용)
     
     Args:
         model_name: AST 모델 이름
@@ -770,52 +640,18 @@ def create_sound_separator(model_name: str = "MIT/ast-finetuned-audioset-10-10-0
         backend_url: 백엔드 API URL
         
     Returns:
-        SoundSeparator 또는 MockSoundSeparator 인스턴스
+        SoundSeparator 인스턴스
     """
-    separator = SoundSeparator(model_name, device, backend_url)
-    
-    if not separator.is_model_available():
-        print("[Separator] Real model not available, using mock separator")
-        return MockSoundSeparator(backend_url)
-    
-    return separator
+    return SoundSeparator(model_name, device, backend_url)
 
 
 def main():
-    """테스트용 메인 함수"""
-    import tempfile
-    import numpy as np
-    
-    # 테스트용 오디오 파일 생성
-    test_audio = np.random.randn(16000).astype(np.float32)  # 1초 오디오
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-        torchaudio.save(f.name, torch.from_numpy(test_audio).unsqueeze(0), SR)
-        test_file = f.name
-    
-    try:
-        with create_sound_separator() as separator:
-            print("Sound Separator 테스트 시작...")
-            
-            result = separator.process_audio(test_file, 180)
-            
-            print("처리 결과:")
-            print(f"  Success: {result['success']}")
-            if result['success']:
-                print(f"  Class: {result['class_name']}")
-                print(f"  Type: {result['sound_type']}")
-                print(f"  Confidence: {result['confidence']:.3f}")
-                print(f"  Angle: {result['angle']}°")
-                print(f"  Decibel: {result['decibel']['mean']:.1f} dB")
-                print(f"  Backend: {'✅' if result['backend_success'] else '❌'}")
-            else:
-                print(f"  Error: {result.get('error', 'Unknown error')}")
-            
-            print("Sound Separator 테스트 완료")
-    
-    finally:
-        # 테스트 파일 정리
-        if os.path.exists(test_file):
-            os.unlink(test_file)
+    """실전용 메인 함수"""
+    print("🎵 Sound Separator - 실전 모드")
+    print("=" * 50)
+    print("이 모듈은 sound_pipeline.py에서 사용됩니다.")
+    print("직접 실행하지 마세요.")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

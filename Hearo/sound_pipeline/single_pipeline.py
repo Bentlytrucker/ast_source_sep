@@ -48,8 +48,8 @@ class SingleSoundPipeline:
         # 상태 관리
         self.is_running = False
         
-        # 중복 클래스 전송 방지를 위한 세트
-        self.sent_classes: Set[str] = set()
+        # 각 오디오 파일마다 독립적인 중복 클래스 전송 방지를 위한 세트
+        self.current_sent_classes: Set[str] = set()
         
         # 통계
         self.stats = {
@@ -127,40 +127,39 @@ class SingleSoundPipeline:
             # 3. 음원 분리 수행 (각 패스마다 즉시 처리)
             print("🔍 Starting source separation...")
             
+            # 현재 오디오 파일의 중복 클래스 세트 초기화
+            self.current_sent_classes.clear()
+            
             # 각 패스 완료 시마다 즉시 처리하는 콜백 함수
             def on_pass_complete(source_info):
                 class_name = source_info['class_name']
                 sound_type = source_info['sound_type']
-                confidence = source_info.get('confidence', 0.0)
                 pass_num = source_info.get('pass', 0)
                 
-                print(f"🎵 PASS {pass_num}: {class_name} ({sound_type}) - Confidence: {confidence:.3f}")
-                
-                # 중복 클래스 체크
-                if class_name in self.sent_classes:
-                    print(f"⏭️ SKIP: Duplicate class '{class_name}' already processed in previous pass")
-                    print(f"    📋 Already sent classes: {list(self.sent_classes)}")
+                # 현재 오디오 파일 내에서만 중복 클래스 체크
+                if class_name in self.current_sent_classes:
+                    print(f"⏭️ SKIP: {class_name} ({sound_type}) - Duplicate")
                     self.stats["duplicate_skips"] += 1
-                    print("-" * 30)
                     return
                 
                 # 백엔드 전송
+                backend_success = False
                 if self.backend_url:
-                    print(f"📡 [SINGLE_PIPELINE] Sending to backend: {class_name} at {angle}°")
-                    self._send_to_backend(source_info, angle)
-                    self.stats["backend_sends"] += 1
+                    backend_success = self._send_to_backend(source_info, angle)
+                    if backend_success:
+                        self.stats["backend_sends"] += 1
                 
-                # LED 활성화 (형식에 맞춰서)
+                # LED 활성화
                 if self.led_controller:
-                    print(f"💡 Activating LED: {class_name} ({sound_type})")
                     self.led_controller.activate_led(angle, class_name, sound_type)
                     self.stats["led_activations"] += 1
                 
-                # 전송된 클래스 기록
-                self.sent_classes.add(class_name)
+                # 현재 오디오 파일의 전송된 클래스 기록
+                self.current_sent_classes.add(class_name)
                 
-                print(f"✅ PASS {pass_num} COMPLETED: {class_name} ({sound_type})")
-                print("-" * 30)
+                # 간소화된 출력
+                backend_status = "✅" if backend_success else "❌"
+                print(f"🎵 {class_name} ({sound_type}) - Backend: {backend_status}")
             
             # 분리 실행 (각 패스마다 즉시 처리)
             separated_sources = self.sound_separator.separate_audio(audio_data, max_passes=3, on_pass_complete=on_pass_complete)
@@ -177,7 +176,7 @@ class SingleSoundPipeline:
             print(f"❌ Separation error: {e}")
             return {"success": False, "error": str(e)}
     
-    def _send_to_backend(self, source: Dict[str, Any], angle: int):
+    def _send_to_backend(self, source: Dict[str, Any], angle: int) -> bool:
         """백엔드로 분리된 소리 전송"""
         try:
             import requests
@@ -195,18 +194,16 @@ class SingleSoundPipeline:
                 "decibel": 60.0  # 기본값, 실제로는 계산된 값 사용
             }
             
-            print(f"📤 [SINGLE_PIPELINE] Data: {data}")
-            
             # 백엔드로 전송
             response = requests.post(self.backend_url, json=data, timeout=5)
             
             if response.status_code == 200:
-                print(f"✅ [SINGLE_PIPELINE] Sent to backend: {source['class_name']} ({source['sound_type']}) at {angle}°")
+                return True
             else:
-                print(f"❌ [SINGLE_PIPELINE] Backend send failed: {response.status_code} - {response.text}")
+                return False
                 
         except Exception as e:
-            print(f"❌ Backend send error: {e}")
+            return False
     
     def start(self):
         """파이프라인 시작 - 하나의 스레드에서 순차 실행"""
@@ -262,9 +259,6 @@ class SingleSoundPipeline:
         print(f"Backend sends: {self.stats['backend_sends']}")
         print(f"LED activations: {self.stats['led_activations']}")
         print(f"Duplicate skips: {self.stats['duplicate_skips']}")
-        print(f"Unique classes sent: {len(self.sent_classes)}")
-        if self.sent_classes:
-            print(f"Sent classes: {list(self.sent_classes)}")
         print("==========================================\n")
     
     def cleanup(self):

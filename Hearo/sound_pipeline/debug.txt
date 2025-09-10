@@ -1,434 +1,204 @@
-Sound detected! (64.6dB) micarray wake up...
+[Open] channels=6, rate=16000
+2. Initializing DOA Calculator...
+[DOA] ReSpeaker device found and initialized
+[DOA] Initial direction: 113
+3. Initializing Sound Separator...
+[Separator] Loading AST model: MIT/ast-finetuned-audioset-10-10-0.4593
+[Separator] Device: cpu
+[Separator] ✅ AST model loaded successfully
+4. Initializing LED Controller...
+[LED] ReSpeaker device found and initialized
+[LED] Started in sleep mode
+=== Initialization Complete ===
+
+=== 컴포넌트 상태 ===
+Sound Trigger: ✅
+DOA Calculator: ✅
+Sound Separator: ✅
+LED Controller: ✅
+==================
+
+🔄 Worker thread started
+💤 Starting micarray in sleep mode...
+[LED] Turned off
+✅ Sound Pipeline started successfully!
+📡 Monitoring for sounds above 100dB...
+Press Ctrl+C to stop
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (50.4dB) micarray wake up...
 Recording started...
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4885 to 4895
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: First recording chunk
-[Trigger] Debug: Input data_i16 range: -4885 to 4895
-[Trigger] Debug: Input data_i16 mean: -0.1, std: 700.8
-[Trigger] Debug: Desired channels: 6
-[Trigger] Debug: Mono range: -1138 to 1212
-[Trigger] Debug: Mono mean: 0.1, std: 421.0
-[Trigger] Debug: Mono non-zero samples: 1023 / 1024
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4458 to 7130
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3650 to 4023
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4342 to 4382
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -5135 to 4932
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -6456 to 4304
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4107 to 4504
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3264 to 3882
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3271 to 3412
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3916 to 3771
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3034 to 3314
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4651 to 3828
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4069 to 3090
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4468 to 4305
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4410 to 4692
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4977 to 4856
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3944 to 4616
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4345 to 3689
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4070 to 3445
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4019 to 4319
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3180 to 3846
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3570 to 3383
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3019 to 3365
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3981 to 3305
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4295 to 3216
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1928 to 2344
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4205 to 4663
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -5489 to 5938
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3566 to 3069
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2956 to 2405
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2586 to 2715
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3186 to 2940
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -5385 to 4125
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2448 to 2288
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2300 to 2048
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2100 to 2428
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2790 to 2991
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2335 to 2040
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1649 to 1473
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1566 to 1465
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463327.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463327.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+
+🎵 Processing: triggered_recording_1757463327.wav
+📍 Calculating direction...
+📍 Direction: 114°
+🔍 Analyzing sound...
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757463327.wav
+[Separator] Angle: 114°
+[Separator] Audio length: 4.10s
+Sound detected! (43.7dB) micarray wake up...
+Recording started...
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463331.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463331.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (45.4dB) micarray wake up...
+Recording started...
+[Separator] Classified: Music (other)
+[Separator] Confidence: 0.587
+[Separator] Decibel: 44.9 dB
+[Separator] Separated audio saved: separated_1757463332_Music_other.wav
+[Separator] Skipping backend send for 'other' type: Music
+💡 Setting LED...
+[LED] Color set to 0x000000
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463335.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463335.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (66.3dB) micarray wake up...
+Recording started...
 [LED] Color turned off after 5.0s
 ✅ Processing completed:
    Class: Music
    Type: other
-   Confidence: 0.831
-   Angle: 66°
-   Decibel: 51.1 dB
+   Confidence: 0.587
+   Angle: 114°
+   Decibel: 44.9 dB
    Backend: ✅
    LED: ✅
-   Separated: separated_1757462486_Music_other.wav
+   Separated: separated_1757463332_Music_other.wav
 
-🎵 Processing: triggered_recording_1757462484.wav
+🎵 Processing: triggered_recording_1757463331.wav
 📍 Calculating direction...
-📍 Direction: 69°
+📍 Direction: 113°
 🔍 Analyzing sound...
-[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757462484.wav
-[Separator] Angle: 69°
-[Separator] Debug: Loading audio file: pipeline_output/recordings/triggered_recording_1757462484.wav
-[Separator] Debug: WAV file info - channels: 1, sample_width: 2, framerate: 16000, n_frames: 65536
-[Separator] Debug: Raw audio length: 131072 bytes
-[Separator] Debug: Converted to int16 array, length: 65536
-[Separator] Debug: Raw audio data range: -2320 to 3373
-[Separator] Debug: Raw audio data mean: -0.5, std: 481.9
-[Separator] Debug: Non-zero samples: 65447 / 65536
-[Separator] Debug: Final audio range: -2320 to 3373
-[Separator] Debug: Final audio mean: -0.5, std: 481.9
-[Separator] Debug: Final audio length: 65536 samples (4.10s)
-[Separator] Debug: Final audio dtype: int16
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757463331.wav
+[Separator] Angle: 113°
 [Separator] Audio length: 4.10s
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2030 to 3177
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2776 to 3367
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2601 to 2116
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1813 to 1620
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1890 to 1748
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1550 to 1457
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1531 to 1606
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -2808 to 2067
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -1593 to 1630
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3847 to 4081
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4198 to 4673
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3366 to 2734
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3013 to 2162
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -4666 to 4544
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -5369 to 5838
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -6072 to 6919
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -5514 to 4871
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -5005 to 6017
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -6109 to 7511
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -7793 to 8533
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -7309 to 8678
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -9983 to 9949
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -9250 to 8288
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -8248 to 7159
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
 녹음 종료. 파일 저장 중...
-[Trigger] Debug: Saving WAV file...
-[Trigger] Debug: Total frames collected: 64
-[Trigger] Debug: Total samples: 65536
-[Trigger] Debug: Total bytes to save: 131072
-[Trigger] Debug: First 20 bytes: b"5\x01'\x02\xf1\x01\xf7\x00\xe9\x00+\x01M\x01l\x02e\x039\x03"
-[Trigger] Debug: Last 20 bytes: b'\n\xffb\xfel\xfe\xc6\xfe\xbf\x004\x01R\xfe4\xfe\xaf\x01\xce\x01'
-[Trigger] Debug: First 20 samples: [ 309  551  497  247  233  299  333  620  869  825  567  191  -64  -73
-   14   84  148  210   50 -485]
-[Trigger] Debug: First samples range: -485 to 869
-Saved: pipeline_output/recordings/triggered_recording_1757462493.wav
+Saved: pipeline_output/recordings/triggered_recording_1757463339.wav
 Waiting for sounds above 100dB...
-📝 Added to processing queue: triggered_recording_1757462493.wav
+📝 Added to processing queue: triggered_recording_1757463339.wav
 Waiting for sounds above 100dB... (Press Ctrl+C to stop)
-Sound detected! (68.4dB) micarray wake up...
+Sound detected! (62.2dB) micarray wake up...
 Recording started...
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -6884 to 6686
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: First recording chunk
-[Trigger] Debug: Input data_i16 range: -6884 to 6686
-[Trigger] Debug: Input data_i16 mean: 1.6, std: 1085.7
-[Trigger] Debug: Desired channels: 6
-[Trigger] Debug: Mono range: -1805 to 1654
-[Trigger] Debug: Mono mean: 1.1, std: 678.3
-[Trigger] Debug: Mono non-zero samples: 1024 / 1024
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -9121 to 8446
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -9672 to 7510
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -8520 to 9382
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -6927 to 5555
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3222 to 3171
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -5414 to 3571
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -6232 to 6843
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -6562 to 6763
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -7818 to 7181
-[Trigger] Debug: Channel 5 range: 0 to 0
-[Trigger] Debug: Channel 5 non-zero: 0 / 1024
-[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3
-[Trigger] Debug: Interleaved data shape: (1024, 6)
-[Trigger] Debug: Channel 0 range: -3360 to 3103
-[Trigger] Debug: Channel 5 range: 0 to 0
+[Separator] Classified: Music (other)
+[Separator] Confidence: 0.546
+[Separator] Decibel: 52.1 dB
+[Separator] Separated audio saved: separated_1757463342_Music_other.wav
+[Separator] Skipping backend send for 'other' type: Music
+💡 Setting LED...
+[LED] Color set to 0x000000
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463343.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463343.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (51.8dB) micarray wake up...
+Recording started...
+[LED] Color turned off after 5.0s
+✅ Processing completed:
+   Class: Music
+   Type: other
+   Confidence: 0.546
+   Angle: 113°
+   Decibel: 52.1 dB
+   Backend: ✅
+   LED: ✅
+   Separated: separated_1757463342_Music_other.wav
+
+🎵 Processing: triggered_recording_1757463335.wav
+📍 Calculating direction...
+📍 Direction: 114°
+🔍 Analyzing sound...
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757463335.wav
+[Separator] Angle: 114°
+[Separator] Audio length: 4.10s
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463347.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463347.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (55.1dB) micarray wake up...
+Recording started...
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463351.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463351.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (55.7dB) micarray wake up...
+Recording started...
+[Separator] Classified: Music (other)
+[Separator] Confidence: 0.455
+[Separator] Decibel: 46.5 dB
+[Separator] Separated audio saved: separated_1757463352_Music_other.wav
+[Separator] Skipping backend send for 'other' type: Music
+💡 Setting LED...
+[LED] Color set to 0x000000
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463355.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463355.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (49.7dB) micarray wake up...
+Recording started...
+[LED] Color turned off after 5.0s
+✅ Processing completed:
+   Class: Music
+   Type: other
+   Confidence: 0.455
+   Angle: 114°
+   Decibel: 46.5 dB
+   Backend: ✅
+   LED: ✅
+   Separated: separated_1757463352_Music_other.wav
+
+🎵 Processing: triggered_recording_1757463339.wav
+📍 Calculating direction...
+📍 Direction: 114°
+🔍 Analyzing sound...
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757463339.wav
+[Separator] Angle: 114°
+[Separator] Audio length: 4.10s
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463359.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463359.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (56.6dB) micarray wake up...
+Recording started...
+[Separator] Classified: Music (other)
+[Separator] Confidence: 0.476
+[Separator] Decibel: 48.7 dB
+[Separator] Separated audio saved: separated_1757463362_Music_other.wav
+[Separator] Skipping backend send for 'other' type: Music
+💡 Setting LED...
+[LED] Color set to 0x000000
+녹음 종료. 파일 저장 중...
+Saved: pipeline_output/recordings/triggered_recording_1757463363.wav
+Waiting for sounds above 100dB...
+📝 Added to processing queue: triggered_recording_1757463363.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (53.2dB) micarray wake up...
+Recording started...
+[LED] Color turned off after 5.0s
+✅ Processing completed:
+   Class: Music
+   Type: other
+   Confidence: 0.476
+   Angle: 114°
+   Decibel: 48.7 dB
+   Backend: ✅
+   LED: ✅
+   Separated: separated_1757463362_Music_other.wav
+
+🎵 Processing: triggered_recording_1757463343.wav
+📍 Calculating direction...
+📍 Direction: 113°
+🔍 Analyzing sound...

@@ -396,8 +396,8 @@ class SourceSeparationThread:
         print("=====================================\n")
 
 
-class DualSoundPipeline:
-    """Dual Thread Sound Pipeline - Raspberry Pi용"""
+class SingleSoundPipeline:
+    """Single Thread Sound Pipeline - Raspberry Pi용"""
     
     def __init__(self, output_dir: str = "pipeline_output", 
                  model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593",
@@ -593,57 +593,210 @@ if __name__ == "__main__":
                     print(f"❌ Failed to start Source Separation Thread: {e}")
     
     def start(self):
-        """파이프라인 시작 - 같은 터미널에서 두 스레드 동시 실행"""
+        """파이프라인 시작 - 하나의 스레드에서 순차 실행"""
         if self.is_running:
             print("⚠️ Pipeline is already running")
             return
         
-        print("🚀 Starting Dual Thread Sound Pipeline...")
+        print("🚀 Starting Single Thread Sound Pipeline...")
         print("=" * 60)
-        print("Thread 1: Fast Classification (Danger LED)")
-        print("Thread 2: Source Separation (Backend + LED)")
+        print("Mode: Fast Classification → Source Separation (Sequential)")
         print("=" * 60)
         
-        # 스레드들 초기화
-        self.fast_classification_thread = FastClassificationThread(
-            self.output_dir, self.model_name, self.device
-        )
-        self.source_separation_thread = SourceSeparationThread(
-            self.output_dir, self.model_name, self.device, self.backend_url
-        )
+        # 컴포넌트들 초기화
+        self._initialize_components()
         
-        # 스레드들 시작
+        # 메인 루프 시작
         self.is_running = True
         
-        print("\n🔄 Starting Fast Classification Thread...")
-        self.fast_classification_thread.start()
-        
-        print("\n🔄 Starting Source Separation Thread...")
-        self.source_separation_thread.start()
-        
-        # 스레드들이 백그라운드에서 계속 실행되도록 설정
-        self.fast_classification_thread.thread.daemon = True
-        self.source_separation_thread.thread.daemon = True
-        
-        print("\n✅ Dual Thread Sound Pipeline started successfully!")
-        print("📡 Both threads are now running in the same terminal")
-        print("🔴 Fast Classification Thread: Monitors for sounds and lights RED LED for DANGER")
-        print("🔍 Source Separation Thread: Processes queued files and sends to backend")
-        print("\nPress Ctrl+C to stop both threads")
-        print("💡 Both threads will continue running in background...")
+        print("\n✅ Single Thread Sound Pipeline started successfully!")
+        print("📡 Monitoring for sounds above 100dB...")
+        print("🔴 Will immediately light RED LED for DANGER sounds")
+        print("🔍 Will process audio separation and send to backend")
+        print("\nPress Ctrl+C to stop")
         
         try:
-            # 메인 스레드에서 대기 (스레드들이 백그라운드에서 계속 실행)
-            print("💡 Main launcher will exit, but threads continue running in background")
-            print("💡 To stop threads: kill the Python processes or restart system")
-            
-            # 잠시 대기 후 메인 스레드 종료 (스레드들은 백그라운드에서 계속 실행)
-            time.sleep(2.0)
-            print("✅ Launcher exited. Threads are running in background.")
-            
+            self._main_loop()
         except KeyboardInterrupt:
             print("\n🛑 Stopping pipeline...")
             self.stop()
+    
+    def _initialize_components(self):
+        """컴포넌트들 초기화"""
+        print("=== Single Thread Pipeline Initialization ===")
+        
+        # Initialize Sound Trigger
+        print("1. Initializing Sound Trigger...")
+        self.sound_trigger = SoundTrigger(os.path.join(self.output_dir, "recordings"), None)
+        
+        # Initialize DOA Calculator
+        print("2. Initializing DOA Calculator...")
+        self.doa_calculator = create_doa_calculator()
+        
+        # Initialize Sound Separator
+        print("3. Initializing Sound Separator...")
+        self.sound_separator = create_sound_separator(self.model_name, self.device, self.backend_url)
+        
+        # Initialize LED Controller
+        print("4. Initializing LED Controller...")
+        self.led_controller = create_led_controller()
+        if self.led_controller is None:
+            print("⚠️ LED Controller not available - LED control disabled")
+        
+        # 중복 클래스 전송 방지를 위한 세트
+        self.sent_classes: Set[str] = set()
+        
+        # 통계
+        self.stats = {
+            "total_detected": 0,
+            "danger_detected": 0,
+            "fast_classifications": 0,
+            "total_processed": 0,
+            "successful_separations": 0,
+            "backend_sends": 0,
+            "led_activations": 0,
+            "duplicate_skips": 0
+        }
+        
+        print("=== Single Thread Pipeline Ready ===")
+    
+    def _main_loop(self):
+        """메인 루프 - 소리 감지부터 분리까지 순차 처리"""
+        while self.is_running:
+            try:
+                # 1. 소리 감지 및 녹음
+                recorded_file = self.sound_trigger.start_monitoring()
+                
+                if recorded_file and self.is_running:
+                    self.stats["total_detected"] += 1
+                    print(f"\n🎵 Processing: {os.path.basename(recorded_file)}")
+                    
+                    # 2. 빠른 분류 (Danger 감지 시 즉시 LED)
+                    fast_result = self._fast_classify(recorded_file)
+                    
+                    if fast_result["success"]:
+                        print(f"📍 Direction: {fast_result['angle']}°")
+                        print(f"⚡ Fast classification: {fast_result['class_name']} ({fast_result['sound_type']})")
+                        
+                        # 3. 음원 분리 및 백엔드 전송
+                        separation_result = self._process_separation(recorded_file)
+                        
+                        if separation_result["success"]:
+                            separated_sources = separation_result.get("separated_sources", [])
+                            print(f"✅ Separation completed: {len(separated_sources)} sources")
+                        else:
+                            print(f"❌ Separation failed: {separation_result.get('error', 'Unknown error')}")
+                    else:
+                        print(f"❌ Fast classification failed: {fast_result.get('error', 'Unknown error')}")
+                
+            except Exception as e:
+                print(f"❌ Main loop error: {e}")
+                continue
+    
+    def _fast_classify(self, audio_file: str) -> Dict[str, Any]:
+        """빠른 분류 수행"""
+        try:
+            # 1. Calculate DOA
+            angle = self.doa_calculator.get_direction_with_retry(max_retries=2)
+            if angle is None:
+                angle = 0
+            
+            # 2. Fast classification (no separation)
+            result = self.sound_separator.process_audio(audio_file, angle, None)  # No output dir
+            
+            if result["success"]:
+                sound_type = result["sound_type"]
+                class_name = result["class_name"]
+                confidence = result["confidence"]
+                
+                # 3. Danger 감지 시 즉시 빨간 LED
+                if sound_type == "danger":
+                    print(f"🚨 DANGER DETECTED! {class_name} (confidence: {confidence:.3f})")
+                    if self.led_controller:
+                        self.led_controller.activate_led(angle, class_name, sound_type)
+                    self.stats["danger_detected"] += 1
+                else:
+                    print(f"✅ {sound_type.upper()}: {class_name} (confidence: {confidence:.3f})")
+                
+                self.stats["fast_classifications"] += 1
+                
+                return {
+                    "success": True,
+                    "sound_type": sound_type,
+                    "class_name": class_name,
+                    "confidence": confidence,
+                    "angle": angle,
+                    "is_danger": sound_type == "danger"
+                }
+            else:
+                print(f"❌ Fast classification failed: {result.get('error', 'Unknown error')}")
+                return result
+                
+        except Exception as e:
+            print(f"❌ Fast classification error: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _process_separation(self, audio_file: str) -> Dict[str, Any]:
+        """음원 분리 및 각 패스마다 백엔드 전송 (중복 클래스 전송 방지)"""
+        try:
+            # 1. Calculate DOA
+            angle = self.doa_calculator.get_direction_with_retry(max_retries=2)
+            if angle is None:
+                angle = 0
+            
+            # 2. Sound separation (파일 저장 안함)
+            result = self.sound_separator.process_audio(audio_file, angle, None)  # No output dir
+            
+            if result["success"]:
+                separated_sources = result.get("separated_sources", [])
+                
+                # 3. 각 분리된 소리마다 백엔드 전송 및 LED 활성화 (중복 클래스 스킵)
+                for i, source in enumerate(separated_sources):
+                    if source.get('audio') is not None:
+                        class_name = source['class_name']
+                        sound_type = source['sound_type']
+                        
+                        print(f"🎵 Processing separated source {i+1}: {class_name}")
+                        
+                        # 중복 클래스 체크
+                        if class_name in self.sent_classes:
+                            print(f"⏭️ Skipping duplicate class: {class_name}")
+                            self.stats["duplicate_skips"] += 1
+                            continue
+                        
+                        # 백엔드 전송
+                        if self.backend_url:
+                            self._send_to_backend(source, angle)
+                            self.stats["backend_sends"] += 1
+                        
+                        # LED 활성화 (형식에 맞춰서)
+                        if self.led_controller:
+                            self.led_controller.activate_led(angle, class_name, sound_type)
+                            self.stats["led_activations"] += 1
+                        
+                        # 전송된 클래스 기록
+                        self.sent_classes.add(class_name)
+                        
+                        print(f"✅ Source {i+1} processed: {class_name} ({sound_type})")
+                
+                self.stats["successful_separations"] += 1
+                return result
+            else:
+                print(f"❌ Separation failed: {result.get('error', 'Unknown error')}")
+                return result
+                
+        except Exception as e:
+            print(f"❌ Separation error: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _send_to_backend(self, source: Dict[str, Any], angle: int):
+        """백엔드로 분리된 소리 전송"""
+        try:
+            # TODO: 백엔드 전송 로직 구현
+            print(f"📡 Sending to backend: {source['class_name']} at {angle}°")
+            # 실제 백엔드 전송 코드는 sound_separator.py에 구현됨
+        except Exception as e:
+            print(f"❌ Backend send error: {e}")
     
     def stop(self):
         """파이프라인 중지"""
@@ -651,17 +804,28 @@ if __name__ == "__main__":
             print("⚠️ Pipeline is not running")
             return
         
-        print("🛑 Stopping Dual Thread Sound Pipeline...")
+        print("🛑 Stopping Single Thread Sound Pipeline...")
         
-        # 스레드들 중지
-        if self.fast_classification_thread:
-            self.fast_classification_thread.stop()
-        
-        if self.source_separation_thread:
-            self.source_separation_thread.stop()
+        # LED 끄기
+        if self.led_controller:
+            self.led_controller.turn_off()
         
         self.is_running = False
-        print("✅ Dual Thread Sound Pipeline stopped")
+        print("✅ Single Thread Sound Pipeline stopped")
+        self._print_statistics()
+    
+    def _print_statistics(self):
+        """통계 출력"""
+        print("\n=== Single Thread Pipeline Statistics ===")
+        print(f"Total detected: {self.stats['total_detected']}")
+        print(f"Danger detected: {self.stats['danger_detected']}")
+        print(f"Fast classifications: {self.stats['fast_classifications']}")
+        print(f"Successful separations: {self.stats['successful_separations']}")
+        print(f"Backend sends: {self.stats['backend_sends']}")
+        print(f"LED activations: {self.stats['led_activations']}")
+        print(f"Duplicate skips: {self.stats['duplicate_skips']}")
+        print(f"Sent classes: {len(self.sent_classes)}")
+        print("==========================================\n")
     
     def cleanup(self):
         """리소스 정리"""
@@ -669,23 +833,14 @@ if __name__ == "__main__":
             self.stop()
         
         # 컴포넌트 정리
-        if self.fast_classification_thread:
-            if self.fast_classification_thread.sound_trigger:
-                self.fast_classification_thread.sound_trigger.cleanup()
-            if self.fast_classification_thread.doa_calculator:
-                self.fast_classification_thread.doa_calculator.cleanup()
-            if self.fast_classification_thread.sound_separator:
-                self.fast_classification_thread.sound_separator.cleanup()
-            if self.fast_classification_thread.led_controller:
-                self.fast_classification_thread.led_controller.cleanup()
-        
-        if self.source_separation_thread:
-            if self.source_separation_thread.doa_calculator:
-                self.source_separation_thread.doa_calculator.cleanup()
-            if self.source_separation_thread.sound_separator:
-                self.source_separation_thread.sound_separator.cleanup()
-            if self.source_separation_thread.led_controller:
-                self.source_separation_thread.led_controller.cleanup()
+        if hasattr(self, 'sound_trigger') and self.sound_trigger:
+            self.sound_trigger.cleanup()
+        if hasattr(self, 'doa_calculator') and self.doa_calculator:
+            self.doa_calculator.cleanup()
+        if hasattr(self, 'sound_separator') and self.sound_separator:
+            self.sound_separator.cleanup()
+        if hasattr(self, 'led_controller') and self.led_controller:
+            self.led_controller.cleanup()
     
     def __enter__(self):
         return self
@@ -696,7 +851,7 @@ if __name__ == "__main__":
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description="Dual Thread Sound Pipeline - Fast Classification + Source Separation")
+    parser = argparse.ArgumentParser(description="Single Thread Sound Pipeline - Fast Classification + Source Separation")
     parser.add_argument("--output", "-o", default="pipeline_output", help="Output directory")
     parser.add_argument("--model", "-m", default="MIT/ast-finetuned-audioset-10-10-0.4593", help="AST model name")
     parser.add_argument("--device", "-d", default="auto", help="Device (auto/cpu/cuda)")
@@ -704,7 +859,7 @@ def main():
     
     args = parser.parse_args()
     
-    print("🎵 Dual Thread Sound Pipeline v2.0")
+    print("🎵 Single Thread Sound Pipeline v2.0")
     print("=" * 60)
     print(f"Output directory: {args.output}")
     print(f"Model: {args.model}")
@@ -713,7 +868,7 @@ def main():
     print("=" * 60)
     
     # 파이프라인 실행
-    with DualSoundPipeline(
+    with SingleSoundPipeline(
         output_dir=args.output,
         model_name=args.model,
         device=args.device,

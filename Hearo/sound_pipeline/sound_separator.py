@@ -721,6 +721,12 @@ class SoundSeparator:
             if freq_attn is not None:
                 return self.attention_cache[cache_key], freq_attn, self.cls_head_cache[cache_key]
         
+        # int16 데이터를 float32로 변환
+        if audio.dtype == np.int16:
+            audio = audio.astype(np.float32) / 32767.0
+        elif audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        
         # 10초로 패딩
         target_len = int(10.0 * SR)
         if len(audio) < target_len:
@@ -785,6 +791,12 @@ class SoundSeparator:
     
     def _stft_all(self, audio: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """STFT 변환 및 Mel 스펙트로그램 생성"""
+        # int16 데이터를 float32로 변환 (STFT 요구사항)
+        if audio.dtype == np.int16:
+            audio = audio.astype(np.float32) / 32767.0
+        elif audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        
         wav = torch.from_numpy(audio)
         st = torch.stft(wav, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN,
                         window=WINDOW, return_complex=True, center=True)

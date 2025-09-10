@@ -12,6 +12,7 @@ import numpy as np
 import time
 import sys
 import os
+import threading
 from typing import Optional, Tuple
 
 # ===== 설정 =====
@@ -38,6 +39,11 @@ class SoundTrigger:
         self.device_index = None
         self.max_in_ch = 0
         self.desired_channels = 0
+        
+        # 동시 녹음 제한 (최대 2개)
+        self.active_recordings = 0
+        self.max_concurrent_recordings = 2
+        self.recording_lock = threading.Lock()
         
         # 출력 디렉토리 생성
         os.makedirs(output_dir, exist_ok=True)
@@ -194,11 +200,17 @@ class SoundTrigger:
                 # Calculate dB level
                 db_level = self._calculate_db_level(data_i16, self.desired_channels)
                 
-                # Debug output removed for cleaner operation
-                
                 # Check trigger (above 100dB)
                 if not recording and db_level >= THRESHOLD_DB:
-                    print(f"Sound detected! ({db_level:.1f}dB) micarray wake up...")
+                    # 동시 녹음 제한 확인
+                    with self.recording_lock:
+                        if self.active_recordings >= self.max_concurrent_recordings:
+                            print(f"Sound detected! ({db_level:.1f}dB) but max concurrent recordings reached ({self.max_concurrent_recordings})")
+                            continue
+                        
+                        self.active_recordings += 1
+                        print(f"Sound detected! ({db_level:.1f}dB) micarray wake up...")
+                        print(f"Active recordings: {self.active_recordings}/{self.max_concurrent_recordings}")
                     
                     # Execute wake up if LED controller is available
                     if self.led_controller:
@@ -232,6 +244,11 @@ class SoundTrigger:
                         wf.setframerate(RATE)
                         wf.writeframes(all_frames_data)
                         wf.close()
+
+                        # 동시 녹음 카운터 감소
+                        with self.recording_lock:
+                            self.active_recordings -= 1
+                            print(f"Recording completed. Active recordings: {self.active_recordings}/{self.max_concurrent_recordings}")
 
                         print(f"Saved: {output_filename}")
                         print("Waiting for sounds above 100dB...")

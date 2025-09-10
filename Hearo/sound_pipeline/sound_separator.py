@@ -1179,8 +1179,8 @@ class SoundSeparator:
         
         return src_amp, res, er, used_mask, info
     
-    def separate_audio(self, audio: np.ndarray, max_passes: int = MAX_PASSES) -> List[Dict[str, Any]]:
-        """오디오 분리 실행"""
+    def separate_audio(self, audio: np.ndarray, max_passes: int = MAX_PASSES, on_pass_complete=None) -> List[Dict[str, Any]]:
+        """오디오 분리 실행 (각 패스마다 즉시 처리)"""
         if not self.is_available:
             print("[Separator] ❌ Model not available for separation")
             return []
@@ -1201,7 +1201,7 @@ class SoundSeparator:
             )
             
             # 결과 저장
-            sources.append({
+            source_info = {
                 "pass": pass_idx + 1,
                 "class_name": info['class_name'],
                 "sound_type": info['sound_type'],
@@ -1209,7 +1209,15 @@ class SoundSeparator:
                 "energy_ratio": er,
                 "anchor": info['anchor'],
                 "audio": src_amp
-            })
+            }
+            sources.append(source_info)
+            
+            # 각 패스 완료 즉시 처리 (백엔드 전송, LED 출력)
+            print(f"[Separator] ✅ Pass {pass_idx + 1} completed: {info['class_name']} ({info['sound_type']})")
+            
+            # 콜백 함수 호출 (각 패스 완료 시마다)
+            if on_pass_complete:
+                on_pass_complete(source_info)
             
             # 잔여물을 다음 패스의 입력으로 사용
             current_audio = res

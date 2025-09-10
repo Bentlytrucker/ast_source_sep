@@ -479,14 +479,32 @@ if __name__ == "__main__":
         if os.name == 'nt':  # Windows
             cmd = f'start "Fast Classification Thread" cmd /k "cd /d {current_dir} && python {fast_script_path}"'
         else:  # Linux/Mac
-            # Raspberry Pi에서는 xterm 사용
-            cmd = f'xterm -title "Fast Classification Thread" -e "cd {current_dir} && python {fast_script_path}; bash"'
-        
-        try:
-            subprocess.Popen(cmd, shell=True)
-            print("✅ Fast Classification Thread started in separate terminal")
-        except Exception as e:
-            print(f"❌ Failed to start Fast Classification Thread: {e}")
+            # Raspberry Pi에서는 여러 터미널 옵션 시도
+            terminal_commands = [
+                f'lxterminal --title="Fast Classification Thread" --command="bash -c \'cd {current_dir} && python {fast_script_path}; bash\'"',
+                f'gnome-terminal --title="Fast Classification Thread" -- bash -c "cd {current_dir} && python {fast_script_path}; exec bash"',
+                f'xterm -title "Fast Classification Thread" -e "cd {current_dir} && python {fast_script_path}; bash"',
+                f'python {fast_script_path}'  # 백그라운드 실행
+            ]
+            
+            success = False
+            for cmd in terminal_commands:
+                try:
+                    subprocess.Popen(cmd, shell=True)
+                    print("✅ Fast Classification Thread started in separate terminal")
+                    success = True
+                    break
+                except Exception as e:
+                    continue
+            
+            if not success:
+                print("❌ Failed to start Fast Classification Thread in separate terminal")
+                print("💡 Running in background instead...")
+                try:
+                    subprocess.Popen(f'python {fast_script_path}', shell=True)
+                    print("✅ Fast Classification Thread started in background")
+                except Exception as e:
+                    print(f"❌ Failed to start Fast Classification Thread: {e}")
     
     def _start_source_separation_terminal(self):
         """Source Separation Thread를 별도 터미널에서 실행"""
@@ -545,17 +563,35 @@ if __name__ == "__main__":
         if os.name == 'nt':  # Windows
             cmd = f'start "Source Separation Thread" cmd /k "cd /d {current_dir} && python {sep_script_path}"'
         else:  # Linux/Mac
-            # Raspberry Pi에서는 xterm 사용
-            cmd = f'xterm -title "Source Separation Thread" -e "cd {current_dir} && python {sep_script_path}; bash"'
-        
-        try:
-            subprocess.Popen(cmd, shell=True)
-            print("✅ Source Separation Thread started in separate terminal")
-        except Exception as e:
-            print(f"❌ Failed to start Source Separation Thread: {e}")
+            # Raspberry Pi에서는 여러 터미널 옵션 시도
+            terminal_commands = [
+                f'lxterminal --title="Source Separation Thread" --command="bash -c \'cd {current_dir} && python {sep_script_path}; bash\'"',
+                f'gnome-terminal --title="Source Separation Thread" -- bash -c "cd {current_dir} && python {sep_script_path}; exec bash"',
+                f'xterm -title "Source Separation Thread" -e "cd {current_dir} && python {sep_script_path}; bash"',
+                f'python {sep_script_path}'  # 백그라운드 실행
+            ]
+            
+            success = False
+            for cmd in terminal_commands:
+                try:
+                    subprocess.Popen(cmd, shell=True)
+                    print("✅ Source Separation Thread started in separate terminal")
+                    success = True
+                    break
+                except Exception as e:
+                    continue
+            
+            if not success:
+                print("❌ Failed to start Source Separation Thread in separate terminal")
+                print("💡 Running in background instead...")
+                try:
+                    subprocess.Popen(f'python {sep_script_path}', shell=True)
+                    print("✅ Source Separation Thread started in background")
+                except Exception as e:
+                    print(f"❌ Failed to start Source Separation Thread: {e}")
     
     def start(self):
-        """파이프라인 시작 - 두 개 터미널로 분리 실행"""
+        """파이프라인 시작 - 같은 터미널에서 두 스레드 동시 실행"""
         if self.is_running:
             print("⚠️ Pipeline is already running")
             return
@@ -566,24 +602,28 @@ if __name__ == "__main__":
         print("Thread 2: Source Separation (Backend + LED)")
         print("=" * 60)
         
-        # 두 개 터미널로 분리 실행
+        # 스레드들 초기화
+        self.fast_classification_thread = FastClassificationThread(
+            self.output_dir, self.model_name, self.device
+        )
+        self.source_separation_thread = SourceSeparationThread(
+            self.output_dir, self.model_name, self.device, self.backend_url
+        )
+        
+        # 스레드들 시작
         self.is_running = True
         
-        print("\n🔄 Starting Fast Classification Thread in separate terminal...")
-        self._start_fast_classification_terminal()
-        time.sleep(2)  # 잠시 대기
+        print("\n🔄 Starting Fast Classification Thread...")
+        self.fast_classification_thread.start()
         
-        print("\n🔄 Starting Source Separation Thread in separate terminal...")
-        self._start_source_separation_terminal()
+        print("\n🔄 Starting Source Separation Thread...")
+        self.source_separation_thread.start()
         
         print("\n✅ Dual Thread Sound Pipeline started successfully!")
-        print("📡 Both threads are now running in separate terminal windows")
+        print("📡 Both threads are now running in the same terminal")
         print("🔴 Fast Classification Thread: Monitors for sounds and lights RED LED for DANGER")
         print("🔍 Source Separation Thread: Processes queued files and sends to backend")
-        print("\n💡 To stop the threads:")
-        print("   - Close the terminal windows manually")
-        print("   - Or press Enter in each terminal window")
-        print("\nPress Ctrl+C to exit this launcher")
+        print("\nPress Ctrl+C to stop both threads")
         
         try:
             # 메인 스레드에서 대기
@@ -591,9 +631,7 @@ if __name__ == "__main__":
                 time.sleep(1.0)
                 
         except KeyboardInterrupt:
-            print("\n🛑 Launcher stopped")
-            print("💡 Note: The separate terminal windows are still running")
-            print("   Close them manually to stop the threads")
+            print("\n🛑 Stopping pipeline...")
             self.stop()
     
     def stop(self):
@@ -604,17 +642,12 @@ if __name__ == "__main__":
         
         print("🛑 Stopping Dual Thread Sound Pipeline...")
         
-        # 임시 스크립트 파일들 정리
-        try:
-            fast_script_path = os.path.join(self.output_dir, "fast_classification_temp.py")
-            sep_script_path = os.path.join(self.output_dir, "source_separation_temp.py")
-            
-            if os.path.exists(fast_script_path):
-                os.remove(fast_script_path)
-            if os.path.exists(sep_script_path):
-                os.remove(sep_script_path)
-        except:
-            pass
+        # 스레드들 중지
+        if self.fast_classification_thread:
+            self.fast_classification_thread.stop()
+        
+        if self.source_separation_thread:
+            self.source_separation_thread.stop()
         
         self.is_running = False
         print("✅ Dual Thread Sound Pipeline stopped")
@@ -624,17 +657,24 @@ if __name__ == "__main__":
         if self.is_running:
             self.stop()
         
-        # 임시 스크립트 파일들 정리
-        try:
-            fast_script_path = os.path.join(self.output_dir, "fast_classification_temp.py")
-            sep_script_path = os.path.join(self.output_dir, "source_separation_temp.py")
-            
-            if os.path.exists(fast_script_path):
-                os.remove(fast_script_path)
-            if os.path.exists(sep_script_path):
-                os.remove(sep_script_path)
-        except:
-            pass
+        # 컴포넌트 정리
+        if self.fast_classification_thread:
+            if self.fast_classification_thread.sound_trigger:
+                self.fast_classification_thread.sound_trigger.cleanup()
+            if self.fast_classification_thread.doa_calculator:
+                self.fast_classification_thread.doa_calculator.cleanup()
+            if self.fast_classification_thread.sound_separator:
+                self.fast_classification_thread.sound_separator.cleanup()
+            if self.fast_classification_thread.led_controller:
+                self.fast_classification_thread.led_controller.cleanup()
+        
+        if self.source_separation_thread:
+            if self.source_separation_thread.doa_calculator:
+                self.source_separation_thread.doa_calculator.cleanup()
+            if self.source_separation_thread.sound_separator:
+                self.source_separation_thread.sound_separator.cleanup()
+            if self.source_separation_thread.led_controller:
+                self.source_separation_thread.led_controller.cleanup()
     
     def __enter__(self):
         return self

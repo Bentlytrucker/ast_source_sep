@@ -79,7 +79,19 @@ ANCHOR_SUPPRESS_MS = 200
 ANCHOR_SUPPRESS_BASE = 0.6
 
 MAX_PASSES = 3
-MIN_ERATIO = 0.01
+MIN_ERATIO = 0.005  # 더 약한 소리도 분리하도록 임계값 낮춤
+
+# 분리 강도 조정 (다중 소리 분리 개선)
+MASK_SIGMOID_CENTER = 0.6   # 시그모이드 중심값 (더 균형잡힌 분리)
+MASK_SIGMOID_SLOPE = 20.0   # 시그모이드 기울기 (부드러운 분리)
+ALPHA_ATT = 0.50            # 어텐션 가중치 (덜 공격적인 분리)
+BETA_PUR = 1.2              # 순도 가중치 (보다 보수적인 분리)
+W_E = 0.35                  # 에너지 가중치 (잔여물에 더 많은 에너지 보존)
+
+# 잔여물 증폭 설정
+RESIDUAL_AMPLIFY = True     # 잔여물 증폭 활성화
+RESIDUAL_GAIN = 2.0         # 잔여물 증폭 배수 (2배)
+RESIDUAL_MAX_GAIN = 4.0     # 최대 증폭 배수 (4배)
 
 # Backend API
 USER_ID = 6
@@ -114,6 +126,34 @@ def align_len_1d(x: torch.Tensor, T: int, device=None, mode="linear"):
 def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 0.0) -> torch.Tensor:
     sig = torch.sigmoid(slope * (x - center))
     return min_val + (1.0 - min_val) * sig
+
+def amplify_residual(residual: np.ndarray, gain: float = 2.0, max_gain: float = 4.0) -> np.ndarray:
+    """잔여물 증폭 (클리핑 방지)"""
+    try:
+        # 현재 RMS 계산
+        current_rms = np.sqrt(np.mean(residual ** 2))
+        if current_rms < 1e-8:  # 너무 작은 경우
+            return residual
+        
+        # 증폭 적용
+        amplified = residual * gain
+        
+        # 클리핑 방지 (최대 증폭 제한)
+        max_amplified_rms = current_rms * max_gain
+        current_amplified_rms = np.sqrt(np.mean(amplified ** 2))
+        
+        if current_amplified_rms > max_amplified_rms:
+            # 최대 증폭으로 제한
+            amplified = amplified * (max_amplified_rms / current_amplified_rms)
+        
+        # -1.0 ~ 1.0 범위로 클리핑
+        amplified = np.clip(amplified, -1.0, 1.0)
+        
+        return amplified
+        
+    except Exception as e:
+        print(f"[Separator] Residual amplification error: {e}")
+        return residual
 
 
 class SoundSeparator:
@@ -1219,8 +1259,14 @@ class SoundSeparator:
             if on_pass_complete:
                 on_pass_complete(source_info)
             
-            # 잔여물을 다음 패스의 입력으로 사용
-            current_audio = res
+            # 잔여물을 다음 패스의 입력으로 사용 (증폭 적용)
+            if RESIDUAL_AMPLIFY and pass_idx < max_passes - 1:  # 마지막 패스가 아닌 경우만
+                # 잔여물 증폭
+                current_audio = amplify_residual(res, RESIDUAL_GAIN, RESIDUAL_MAX_GAIN)
+                print(f"[Separator] Residual amplified by {RESIDUAL_GAIN}x for next pass")
+            else:
+                current_audio = res
+            
             used_mask_prev = used_mask
             
             # 앵커 정보 저장

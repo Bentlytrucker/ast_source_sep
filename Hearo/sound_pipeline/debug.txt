@@ -1,46 +1,53 @@
-e_sep.py 
-🚀 Source Separation Thread v2.0
-==================================================
-Output directory: pipeline_output
-Model: MIT/ast-finetuned-audioset-10-10-0.4593
-Device: auto
-Backend URL: http://13.238.200.232:8000/sound-events/
-==================================================
-=== Source Separation Thread Initialization ===
-1. Initializing DOA Calculator...
+k
+[Device] index=0, name='ReSpeaker 4 Mic Array (UAC1.0): USB Audio (hw:2,0)', maxInputChannels=6
+[Open] channels=6, rate=16000
+2. Initializing DOA Calculator...
 [DOA] ReSpeaker device found and initialized
-[DOA] Initial direction: 217
-2. Initializing Sound Separator...
+[DOA] Initial direction: 232
+3. Initializing Sound Separator...
 [Separator] Loading AST model: MIT/ast-finetuned-audioset-10-10-0.4593
 [Separator] Device: cpu
 [Separator] ✅ AST model loaded successfully
-3. Initializing LED Controller...
+4. Initializing LED Controller...
 [LED] ReSpeaker device found and initialized
 [LED] Started in sleep mode
-=== Source Separation Thread Ready ===
-🚀 Source Separation Thread started!
-✅ Source Separation Thread started successfully!
-🔍 Processing queued audio files for separation...
+=== Single Thread Pipeline Ready ===
 
-✅ Source Separation Thread started successfully!
-🔍 Processing queued audio files for separation...
-📡 Will send each separated source to backend
-💡 Will activate LED for each separated source
-Press Enter to stop...
-📡 Will send each separated source to backend
-💡 Will activate LED for each separated source
+✅ Single Thread Sound Pipeline started successfully!
+📡 Monitoring for sounds above 100dB...
+🔴 Will immediately light RED LED for DANGER sounds
+🔍 Will process audio separation and send to backend
+
 Press Ctrl+C to stop
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+Sound detected! (70.8dB) micarray wake up...
+Active recordings: 1/2
+Recording started...
+녹음 종료. 파일 저장 중...
+Recording completed. Active recordings: 0/2
+Saved: pipeline_output/recordings/triggered_recording_1757470247.wav
+Waiting for sounds above 100dB...
 
-[LED] Turned off
-✅ Source Separation Thread stopped
-
-=== Source Separation Statistics ===
-Total processed: 0
-Successful separations: 0
-Backend sends: 0
-LED activations: 0
-Duplicate skips: 0
-Sent classes: 0
-=====================================
-
-✅ Source Separation Thread stopped
+🎵 Processing: triggered_recording_1757470247.wav
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757470247.wav
+[Separator] Angle: 257°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Alarm clock (warning)
+[Separator] Confidence: 0.348
+[Separator] Decibel: 60.9 dB
+🔄 Sending to backend: http://13.238.200.232:8000/sound-events/
+📤 Data: {'user_id': 6, 'sound_type': 'warning', 'sound_detail': 'Alarm clock', 'angle': 257, 'occurred_at': '2025-09-10T02:10:52Z', 'sound_icon': 'string', 'location_image_url': 'string', 'decibel': 60.87227249145508}
+✅ Sent to backend: Alarm clock (warning) at 257°
+✅ WARNING: Alarm clock (confidence: 0.348)
+📍 Direction: 257°
+⚡ Fast classification: Alarm clock (warning)
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757470247.wav
+[Separator] Angle: 257°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Alarm clock (warning)
+[Separator] Confidence: 0.348
+[Separator] Decibel: 60.9 dB
+🔄 Sending to backend: http://13.238.200.232:8000/sound-events/
+📤 Data: {'user_id': 6, 'sound_type': 'warning', 'sound_detail': 'Alarm clock', 'angle': 257, 'occurred_at': '2025-09-10T02:11:00Z', 'sound_icon': 'string', 'location_image_url': 'string', 'decibel': 60.87227249145508}
+✅ Sent to backend: Alarm clock (warning) at 257°
+✅ Separation completed: 0 sources

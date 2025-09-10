@@ -1,9 +1,8 @@
-k
-[Device] index=0, name='ReSpeaker 4 Mic Array (UAC1.0): USB Audio (hw:2,0)', maxInputChannels=6
+InputChannels=6
 [Open] channels=6, rate=16000
 2. Initializing DOA Calculator...
 [DOA] ReSpeaker device found and initialized
-[DOA] Initial direction: 232
+[DOA] Initial direction: 284
 3. Initializing Sound Separator...
 [Separator] Loading AST model: MIT/ast-finetuned-audioset-10-10-0.4593
 [Separator] Device: cpu
@@ -15,39 +14,24 @@ k
 
 ✅ Single Thread Sound Pipeline started successfully!
 📡 Monitoring for sounds above 100dB...
-🔴 Will immediately light RED LED for DANGER sounds
 🔍 Will process audio separation and send to backend
+💡 Will activate LED for each separated source
+⏭️ Will skip duplicate classes
 
 Press Ctrl+C to stop
 Waiting for sounds above 100dB... (Press Ctrl+C to stop)
-Sound detected! (70.8dB) micarray wake up...
+Sound detected! (73.6dB) micarray wake up...
 Active recordings: 1/2
 Recording started...
 녹음 종료. 파일 저장 중...
 Recording completed. Active recordings: 0/2
-Saved: pipeline_output/recordings/triggered_recording_1757470247.wav
+Saved: pipeline_output/recordings/triggered_recording_1757470991.wav
 Waiting for sounds above 100dB...
 
-🎵 Processing: triggered_recording_1757470247.wav
-[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757470247.wav
-[Separator] Angle: 257°
-[Separator] Audio length: 4.10s
-[Separator] Classified: Alarm clock (warning)
-[Separator] Confidence: 0.348
-[Separator] Decibel: 60.9 dB
-🔄 Sending to backend: http://13.238.200.232:8000/sound-events/
-📤 Data: {'user_id': 6, 'sound_type': 'warning', 'sound_detail': 'Alarm clock', 'angle': 257, 'occurred_at': '2025-09-10T02:10:52Z', 'sound_icon': 'string', 'location_image_url': 'string', 'decibel': 60.87227249145508}
-✅ Sent to backend: Alarm clock (warning) at 257°
-✅ WARNING: Alarm clock (confidence: 0.348)
-📍 Direction: 257°
-⚡ Fast classification: Alarm clock (warning)
-[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757470247.wav
-[Separator] Angle: 257°
-[Separator] Audio length: 4.10s
-[Separator] Classified: Alarm clock (warning)
-[Separator] Confidence: 0.348
-[Separator] Decibel: 60.9 dB
-🔄 Sending to backend: http://13.238.200.232:8000/sound-events/
-📤 Data: {'user_id': 6, 'sound_type': 'warning', 'sound_detail': 'Alarm clock', 'angle': 257, 'occurred_at': '2025-09-10T02:11:00Z', 'sound_icon': 'string', 'location_image_url': 'string', 'decibel': 60.87227249145508}
-✅ Sent to backend: Alarm clock (warning) at 257°
-✅ Separation completed: 0 sources
+🎵 Processing: triggered_recording_1757470991.wav
+📍 Direction: 289°
+🔍 Starting source separation...
+[Separator] Starting audio separation with 3 passes...
+[Separator] --- Pass 1 ---
+❌ Separation error: stft(torch.ShortTensor[65936], n_fft=400, hop_length=160, win_length=400, window=torch.FloatTensor{[400]}, normalized=0, onesided=None, return_complex=1, align_to_window=None) : expected a tensor of floating point or complex values
+❌ Separation failed: stft(torch.ShortTensor[65936], n_fft=400, hop_length=160, win_length=400, window=torch.FloatTensor{[400]}, normalized=0, onesided=None, return_complex=1, align_to_window=None) : expected a tensor of floating point or complex values

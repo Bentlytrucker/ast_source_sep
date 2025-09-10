@@ -1,1 +1,34 @@
-debug
+(venv) pi@raspberrypi:~/sound/ast_source_sep/Hearo/sound_pipeline $ python dual_pipeline.py 
+🎵 Dual Thread Sound Pipeline v2.0
+============================================================
+Output directory: pipeline_output
+Model: MIT/ast-finetuned-audioset-10-10-0.4593
+Device: auto
+Backend URL: http://13.238.200.232:8000/sound-events/
+============================================================
+🚀 Starting Dual Thread Sound Pipeline...
+============================================================
+Thread 1: Fast Classification (Danger LED)
+Thread 2: Source Separation (Backend + LED)
+============================================================
+
+🔄 Starting Fast Classification Thread in separate terminal...
+🚀 Starting Fast Classification Thread in separate terminal...
+✅ Fast Classification Thread started in separate terminal
+/bin/sh: 1: xterm: not found
+
+🔄 Starting Source Separation Thread in separate terminal...
+🚀 Starting Source Separation Thread in separate terminal...
+✅ Source Separation Thread started in separate terminal
+
+✅ Dual Thread Sound Pipeline started successfully!
+📡 Both threads are now running in separate terminal windows
+🔴 Fast Classification Thread: Monitors for sounds and lights RED LED for DANGER
+🔍 Source Separation Thread: Processes queued files and sends to backend
+
+💡 To stop the threads:
+   - Close the terminal windows manually
+/bin/sh: 1:    - Or press Enter in each terminal window
+xterm: not found
+
+Press Ctrl+C to exit this launcher

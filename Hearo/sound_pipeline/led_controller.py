@@ -231,6 +231,35 @@ class LEDController:
             print(f"[LED] Error running listen animation: {e}")
             return False
     
+    def activate_led(self, angle: int, class_name: str, sound_type: str) -> bool:
+        """
+        각도와 소리 정보에 따라 LED 활성화
+        
+        Args:
+            angle: 소리 방향 각도
+            class_name: 분류된 소리 클래스명
+            sound_type: 소리 타입 (danger/warning/help/other)
+            
+        Returns:
+            활성화 성공 여부
+        """
+        if not self.is_available or not self.pixel_ring:
+            print(f"[LED] Device not available, cannot activate LED for {class_name} ({sound_type})")
+            return False
+        
+        try:
+            # danger 타입인 경우 10초간 깜빡임
+            if sound_type == "danger":
+                print(f"[LED] DANGER detected: {class_name} at {angle}° - activating red LED with blinking")
+                return self.blink_sound_type(sound_type, blink_count=10, blink_duration=1.0)
+            else:
+                print(f"[LED] {sound_type.upper()} detected: {class_name} at {angle}° - activating LED")
+                return self.set_sound_type_color(sound_type, duration=5.0)
+            
+        except Exception as e:
+            print(f"[LED] Error activating LED: {e}")
+            return False
+    
     def turn_off(self) -> bool:
         """
         LED 끄기
@@ -344,6 +373,17 @@ class MockLEDController:
         """Mock 듣기 애니메이션"""
         print("[LED] Mock: Listen animation")
         return True
+    
+    def activate_led(self, angle: int, class_name: str, sound_type: str) -> bool:
+        """Mock LED 활성화"""
+        color = LED_COLORS.get(sound_type, LED_COLORS["default"])
+        
+        if sound_type == "danger":
+            print(f"[LED] Mock: DANGER detected: {class_name} at {angle}° - activating red LED with blinking")
+            return self.blink_sound_type(sound_type, blink_count=10, blink_duration=1.0)
+        else:
+            print(f"[LED] Mock: {sound_type.upper()} detected: {class_name} at {angle}° - activating LED")
+            return self.set_sound_type_color(sound_type, duration=5.0)
     
     def turn_off(self) -> bool:
         """Mock 끄기"""

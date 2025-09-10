@@ -85,6 +85,36 @@ MIN_ERATIO = 0.01
 USER_ID = 6
 BACKEND_URL = "http://13.238.200.232:8000/sound-events/"
 
+# =========================
+# Utility Functions (separator.py에서 가져옴)
+# =========================
+def norm01(x: torch.Tensor) -> torch.Tensor:
+    return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+def ensure_odd(k: int) -> int:
+    return k + 1 if (k % 2 == 0) else k
+
+def smooth1d(x: torch.Tensor, k: int) -> torch.Tensor:
+    if k <= 1: return x
+    ker = torch.ones(k, device=x.device) / k
+    return F.conv1d(x.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1)
+
+def to_np(x: torch.Tensor) -> np.ndarray:
+    return x.detach().cpu().numpy()
+
+def align_len_1d(x: torch.Tensor, T: int, device=None, mode="linear"):
+    if device is None: device = x.device
+    xv = x.to(device).view(1,1,-1).float()
+    if xv.size(-1) == T:
+        out = xv.view(-1)
+    else:
+        out = F.interpolate(xv, size=T, mode=mode, align_corners=False).view(-1)
+    return out.clamp(0,1)
+
+def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 0.0) -> torch.Tensor:
+    sig = torch.sigmoid(slope * (x - center))
+    return min_val + (1.0 - min_val) * sig
+
 
 class SoundSeparator:
     def __init__(self, model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
@@ -110,6 +140,12 @@ class SoundSeparator:
         self.ast_model = None
         self.mel_fb_m2f = None
         self.is_available = False
+        
+        # 분리 관련 캐시
+        self.attention_cache = {}
+        self.freq_attention_cache = {}
+        self.cls_head_cache = {}
+        self.spectrogram_cache = {}
         
         self._initialize_model()
     
@@ -426,19 +462,19 @@ class SoundSeparator:
                 else:
                     print(f"[Separator] Warning: Unsupported sample width: {sample_width}")
                     return np.zeros(L_FIXED, dtype=np.int16)
-                
-                # 데이터 검증
-                if len(audio_data) == 0:
-                    print(f"[Separator] Warning: Empty audio data from {path}")
-                    return np.zeros(L_FIXED, dtype=np.int16)
-                
-                # 0 데이터 검증
-                if np.all(audio_data == 0):
-                    print(f"[Separator] Warning: All audio data is zero from {path}")
-                    return np.zeros(L_FIXED, dtype=np.int16)
-                
-                # Sound Trigger와 동일한 모노 변환 방식
-                if channels > 1:
+            
+            # 데이터 검증
+            if len(audio_data) == 0:
+                print(f"[Separator] Warning: Empty audio data from {path}")
+                return np.zeros(L_FIXED, dtype=np.int16)
+            
+            # 0 데이터 검증
+            if np.all(audio_data == 0):
+                print(f"[Separator] Warning: All audio data is zero from {path}")
+                return np.zeros(L_FIXED, dtype=np.int16)
+            
+            # Sound Trigger와 동일한 모노 변환 방식
+            if channels > 1:
                     # Sound Trigger의 _to_mono_int16과 동일한 로직
                     usable_len = (len(audio_data) // channels) * channels
                     if usable_len != len(audio_data):
@@ -455,25 +491,25 @@ class SoundSeparator:
                     
                     audio_data = mono
                 
-                # 샘플링 레이트 변환 (간단한 리샘플링)
-                if framerate != SR:
-                    # 간단한 리샘플링 (선형 보간)
-                    ratio = SR / framerate
-                    new_length = int(len(audio_data) * ratio)
-                    audio_data = np.interp(
-                        np.linspace(0, len(audio_data), new_length),
-                        np.arange(len(audio_data)),
-                        audio_data.astype(np.float64)
-                    ).astype(np.int16)
+            # 샘플링 레이트 변환 (간단한 리샘플링)
+            if framerate != SR:
+                # 간단한 리샘플링 (선형 보간)
+                ratio = SR / framerate
+                new_length = int(len(audio_data) * ratio)
+                audio_data = np.interp(
+                    np.linspace(0, len(audio_data), new_length),
+                    np.arange(len(audio_data)),
+                    audio_data.astype(np.float64)
+                ).astype(np.int16)
                 
-                
-                # 고정 길이로 조정
-                if len(audio_data) >= L_FIXED:
-                    return audio_data[:L_FIXED]
-                else:
-                    out = np.zeros(L_FIXED, dtype=np.int16)
-                    out[:len(audio_data)] = audio_data
-                    return out
+            
+            # 고정 길이로 조정
+            if len(audio_data) >= L_FIXED:
+                return audio_data[:L_FIXED]
+            else:
+                out = np.zeros(L_FIXED, dtype=np.int16)
+                out[:len(audio_data)] = audio_data
+                return out
                 
         except Exception as e:
             print(f"[Separator] Error loading audio {path}: {e}")
@@ -525,7 +561,7 @@ class SoundSeparator:
             print(f"[Separator] ❌ Classification error: {e}")
             return "Unknown", "other", 0, 0.0
     
-    def _save_separated_audio(self, audio: np.ndarray, class_name: str, sound_type: str, output_dir: str) -> str:
+    def _save_separated_audio(self, audio: np.ndarray, class_name: str, sound_type: str, output_dir: str, suffix: str = "") -> str:
         """
         분리된 오디오를 파일로 저장
         
@@ -548,7 +584,7 @@ class SoundSeparator:
             safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
             safe_class_name = safe_class_name.replace(' ', '_')
             
-            filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}.wav"
+            filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}{suffix}.wav"
             filepath = os.path.join(output_dir, filename)
             
             # int16 데이터를 float32로 변환하여 저장
@@ -600,10 +636,33 @@ class SoundSeparator:
             print(f"[Separator] Confidence: {confidence:.3f}")
             print(f"[Separator] Decibel: {db_mean:.1f} dB")
             
-            # 분리된 소리 저장 (원본 데이터 사용)
+            # 음원 분리 실행 (새로운 기능!)
+            separated_sources = []
             separated_file = None
             if output_dir:
-                separated_file = self._save_separated_audio(audio_raw, class_name, sound_type, output_dir)
+                if self.is_available:
+                    print(f"[Separator] Starting source separation...")
+                    separated_sources = self.separate_audio(audio_normalized, max_passes=MAX_PASSES)
+                    
+                    # 분리된 소리들을 파일로 저장
+                    for i, source in enumerate(separated_sources):
+                        if source['audio'] is not None:
+                            source_file = self._save_separated_audio(
+                                source['audio'], 
+                                source['class_name'], 
+                                source['sound_type'], 
+                                output_dir,
+                                suffix=f"_pass_{source['pass']}"
+                            )
+                            source['file'] = source_file
+                            print(f"[Separator] Separated source {i+1}: {source['class_name']} ({source['sound_type']}) - {source['confidence']:.3f}")
+                    
+                    # 첫 번째 분리된 소리를 기본 separated_file로 설정
+                    if separated_sources:
+                        separated_file = separated_sources[0]['file']
+                else:
+                    # 분리 불가능한 경우 원본 데이터 저장
+                    separated_file = self._save_separated_audio(audio_raw, class_name, sound_type, output_dir)
             
             # 백엔드 전송 (other 타입 제외)
             backend_success = False
@@ -628,7 +687,9 @@ class SoundSeparator:
                 },
                 "backend_success": backend_success,
                 "audio_file": audio_file,
-                "separated_file": separated_file
+                "separated_file": separated_file,
+                "separated_sources": separated_sources,  # 새로운 필드: 분리된 소리들
+                "separation_enabled": self.is_available
             }
             
             return result
@@ -642,14 +703,528 @@ class SoundSeparator:
                 "angle": angle
             }
     
+    # =========================
+    # Source Separation Logic (separator.py에서 가져옴)
+    # =========================
+    
+    def _get_cache_key(self, audio: np.ndarray) -> str:
+        """캐시 키 생성"""
+        return str(hash(audio.tobytes()))
+    
+    def _extract_and_cache_attention(self, audio: np.ndarray, T_out: int, F_out: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """AST 모델 호출하여 시간/주파수 attention map과 CLS features 추출 및 캐싱"""
+        cache_key = self._get_cache_key(audio)
+        
+        # 캐시 확인
+        if cache_key in self.attention_cache and cache_key in self.cls_head_cache:
+            freq_attn = self.freq_attention_cache.get(cache_key)
+            if freq_attn is not None:
+                return self.attention_cache[cache_key], freq_attn, self.cls_head_cache[cache_key]
+        
+        # 10초로 패딩
+        target_len = int(10.0 * SR)
+        if len(audio) < target_len:
+            audio_padded = np.zeros(target_len, dtype=np.float32)
+            audio_padded[:len(audio)] = audio
+        else:
+            audio_padded = audio[:target_len]
+        
+        feat = self.extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
+        
+        # Mel 스펙트로그램 추출 (캐싱용)
+        mel_spec = feat["input_values"].squeeze(0)  # [N_MELS, T]
+        
+        with torch.no_grad():
+            outputs = self.ast_model(input_values=feat["input_values"].to(self.device), output_attentions=True, return_dict=True)
+        
+        # Attention map 추출
+        attns = outputs.attentions
+        if not attns or len(attns) == 0:
+            time_attention = torch.ones(T_out) * 0.5
+            freq_attention = torch.ones(F_out) * 0.5
+        else:
+            A = attns[-1]
+            cls_to_patches = A[0, :, 0, 2:].mean(dim=0)
+            
+            Fp, Tp = 12, 101
+            expected_len = Fp * Tp
+            
+            if cls_to_patches.numel() != expected_len:
+                actual_len = cls_to_patches.numel()
+                if actual_len < expected_len:
+                    cls_to_patches = F.pad(cls_to_patches, (0, expected_len - actual_len))
+                else:
+                    cls_to_patches = cls_to_patches[:expected_len]
+            
+            # 2D 맵으로 재구성
+            full_map = cls_to_patches.reshape(Fp, Tp)  # [12, 101]
+            
+            # 시간 어텐션 (주파수 차원으로 평균)
+            time_attn = full_map.mean(dim=0)  # [101]
+            time_attn_interp = F.interpolate(time_attn.view(1,1,-1), size=T_out, mode="linear", align_corners=False).view(-1)
+            time_attention = norm01(smooth1d(time_attn_interp, SMOOTH_T))
+            
+            # 주파수 어텐션 (시간 차원으로 평균)
+            freq_attn = full_map.mean(dim=1)  # [12]
+            freq_attn_interp = F.interpolate(freq_attn.view(1,1,-1), size=F_out, mode="linear", align_corners=False).view(-1)
+            freq_attention = norm01(freq_attn_interp)
+        
+        # CLS features 추출
+        if hasattr(outputs, 'last_hidden_state'):
+            cls_features = outputs.last_hidden_state[:, 0, :]  # CLS token features
+        else:
+            cls_features = outputs.logits
+        
+        # 캐싱
+        self.attention_cache[cache_key] = time_attention
+        self.freq_attention_cache[cache_key] = freq_attention
+        self.cls_head_cache[cache_key] = cls_features
+        self.spectrogram_cache[cache_key] = mel_spec.clone()
+        
+        return time_attention, freq_attention, cls_features
+    
+    def _stft_all(self, audio: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """STFT 변환 및 Mel 스펙트로그램 생성"""
+        wav = torch.from_numpy(audio)
+        st = torch.stft(wav, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN,
+                        window=WINDOW, return_complex=True, center=True)
+        mag = st.abs()
+        P = (mag * mag).clamp_min(EPS)
+        phase = torch.angle(st)
+
+        if self.mel_fb_m2f.shape[0] != N_MELS:
+            mel_fb_m2f = self.mel_fb_m2f.T.contiguous()
+        else:
+            mel_fb_m2f = self.mel_fb_m2f
+        assert mel_fb_m2f.shape[0] == N_MELS and mel_fb_m2f.shape[1] == P.shape[0]
+        mel_fb_m2f = mel_fb_m2f.to(P.dtype).to(P.device)
+        mel_pow = (mel_fb_m2f @ P).clamp_min(EPS)
+        return st, mag, P, phase, mel_pow
+    
+    def _purity_from_P(self, P: torch.Tensor) -> torch.Tensor:
+        """순수도 계산"""
+        fbins, T = P.shape
+        e = P.sum(dim=0); e_n = e / (e.max() + EPS)
+        p = P / (P.sum(dim=0, keepdim=True) + EPS)
+        H = -(p * (p + EPS).log()).sum(dim=0)
+        Hn = H / np.log(max(2, fbins))
+        pur = W_E * e_n + (1.0 - W_E) * (1.0 - Hn)
+        return norm01(smooth1d(pur, SMOOTH_T))
+    
+    def _anchor_score(self, A_t: torch.Tensor, Pur: torch.Tensor) -> torch.Tensor:
+        """앵커 스코어 계산"""
+        return norm01(smooth1d((A_t.clamp(0,1)**ALPHA_ATT) * (Pur.clamp(0,1)**BETA_PUR), SMOOTH_T))
+    
+    def _pick_anchor_region(self, score: torch.Tensor, La: int, core_pct: float, P: torch.Tensor) -> Tuple[int, int, int, int]:
+        """앵커 영역 선택"""
+        T = score.numel()
+        
+        # 전체 스펙트로그램의 에너지 계산
+        total_energy = P.sum(dim=0)  # [T]
+        energy_threshold = torch.quantile(total_energy, 0.1)  # 하위 10% 에너지 임계값
+        
+        # 에너지가 너무 낮은 구간은 앵커 후보에서 제외
+        valid_regions = total_energy > energy_threshold
+        
+        # 유효한 구간에서만 앵커 선택
+        if valid_regions.sum() == 0:
+            peak_idx = int(torch.argmax(score).item())
+        else:
+            valid_score = score.clone()
+            valid_score[~valid_regions] = -float('inf')
+            peak_idx = int(torch.argmax(valid_score).item())
+        
+        anchor_s = max(0, min(peak_idx - (La // 2), T - La))
+        anchor_e = anchor_s + La
+        local_score = score[anchor_s:anchor_e]
+        peak_idx_rel = int(torch.argmax(local_score).item())
+        threshold = torch.quantile(local_score, core_pct)
+        
+        core_s_rel = peak_idx_rel
+        while core_s_rel > 0 and local_score[core_s_rel - 1] >= threshold:
+            core_s_rel -= 1
+            
+        core_e_rel = peak_idx_rel
+        while core_e_rel < La - 1 and local_score[core_e_rel + 1] >= threshold:
+            core_e_rel += 1
+        
+        core_e_rel += 1
+        return anchor_s, anchor_e, core_s_rel, core_e_rel
+    
+    def _omega_support_with_ast_freq(self, Ablk: torch.Tensor, ast_freq_attn: torch.Tensor, strategy: str = "conservative") -> torch.Tensor:
+        """주파수 지원 영역 계산"""
+        if strategy == "conservative":
+            omega_q = OMEGA_Q_CONSERVATIVE
+            ast_freq_quantile = AST_FREQ_QUANTILE_CONSERVATIVE
+        else:
+            omega_q = OMEGA_Q_AGGRESSIVE
+            ast_freq_quantile = AST_FREQ_QUANTILE_AGGRESSIVE
+        
+        med = Ablk.median(dim=1).values
+        th = torch.quantile(med, omega_q)
+        mask_energy = (med >= th).float()
+        
+        ast_freq_th = torch.quantile(ast_freq_attn, ast_freq_quantile)
+        mask_ast_freq = (ast_freq_attn >= ast_freq_th).float()
+        
+        mask = torch.maximum(mask_energy, mask_ast_freq)
+        
+        for _ in range(OMEGA_DIL):
+            mask = torch.maximum(mask, torch.roll(mask, 1))
+            mask = torch.maximum(mask, torch.roll(mask, -1))
+        
+        if int(mask.sum().item()) < OMEGA_MIN_BINS:
+            order = torch.argsort(med, descending=True)
+            need = OMEGA_MIN_BINS - int(mask.sum().item())
+            take = order[:need]
+            mask[take] = 1.0
+        
+        return mask
+    
+    def _template_from_anchor_block(self, Ablk: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
+        """앵커 블록에서 템플릿 생성"""
+        om = omega.view(-1,1)
+        w = (Ablk * om).mean(dim=1) * omega
+        w = w / (w.sum() + EPS)
+        w_sm = F.avg_pool1d(w.view(1,1,-1), kernel_size=3, stride=1, padding=1).view(-1)
+        w = (w_sm * omega); w = w / (w.sum() + EPS)
+        return w
+    
+    def _presence_from_energy(self, Xmel: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
+        """에너지 기반 존재감 계산"""
+        om = omega.view(-1,1)
+        e_omega = (Xmel * om).sum(dim=0)
+        e_omega = smooth1d(e_omega, PRES_SMOOTH_T)
+        thr = torch.quantile(e_omega, PRES_Q)
+        thr = torch.clamp(thr, min=1e-10)
+        return (e_omega > thr).float()
+    
+    def _amplitude_raw(self, Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
+        """원시 진폭 계산"""
+        om = omega.view(-1,1)
+        Xo = Xmel * om
+        denom = (w_bar*w_bar).sum() + EPS
+        a_raw = (w_bar.view(1,-1) @ Xo).view(-1) / denom
+        return a_raw.clamp_min(0.0)
+    
+    def _cos_similarity_over_omega(self, Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, g_pres: torch.Tensor):
+        """오메가 영역에서 코사인 유사도 계산"""
+        om = omega.view(-1,1)
+        Xo = Xmel * om
+        wn = (w_bar * omega); wn = wn / (wn.norm(p=2) + 1e-8)
+        Xn = Xo / (Xo.norm(p=2, dim=0, keepdim=True) + 1e-8)
+        cos_raw = (wn.view(-1,1) * Xn).sum(dim=0).clamp(0,1)
+        return cos_raw * g_pres
+    
+    def _unified_masking_strategy(self, Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, 
+                                 ast_freq_attn: torch.Tensor, P: torch.Tensor, s: int, e: int, strategy: str = "conservative") -> torch.Tensor:
+        """통합 마스킹 전략"""
+        fbins, T = P.shape
+        
+        # Calculate cosΩ, the core of our mask
+        g_pres = self._presence_from_energy(Xmel, omega)
+        cos_t_raw = self._cos_similarity_over_omega(Xmel, w_bar, omega, g_pres)
+
+        # Map Ω(mel)->Ω(linear) for frequency weighting
+        if omega.shape[0] == self.mel_fb_m2f.shape[0]:
+            omega_lin = ((self.mel_fb_m2f @ omega).clamp_min(0.0) > 1e-12).float()
+        else:
+            omega_lin = torch.ones(self.mel_fb_m2f.shape[1], device=omega.device)
+        
+        # Enhanced Masking Logic
+        anchor_spec = P[:, s:e]
+        anchor_energy = anchor_spec.sum().item()
+        total_energy = P.sum().item()
+        energy_ratio = anchor_energy / (total_energy + 1e-8)
+        
+        is_weak_sound = energy_ratio < 0.1
+        
+        # 기본 마스크: 코사인 유사도 제곱으로 약화
+        cos_squared = cos_t_raw ** 2
+        
+        if is_weak_sound:
+            soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * 0.9 * (cos_squared - MASK_SIGMOID_CENTER * 1.1))
+        else:
+            soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * 1.0 * (cos_squared - MASK_SIGMOID_CENTER * 1.0))
+        
+        # 앵커 영역의 진폭 주파수 선택
+        anchor_max_amp = anchor_spec.max(dim=1).values
+        
+        if is_weak_sound:
+            amp_threshold = torch.quantile(anchor_max_amp, 0.6)
+        else:
+            amp_threshold = torch.quantile(anchor_max_amp, 0.7)
+        
+        high_amp_mask_lin = (anchor_max_amp >= amp_threshold).float()
+        
+        # 앵커 영역에서 활성화된 AST 주파수 선택
+        anchor_ast_freq = ast_freq_attn.clone()
+        
+        if is_weak_sound:
+            ast_freq_threshold = torch.quantile(anchor_ast_freq, 0.5)
+        else:
+            ast_freq_threshold = torch.quantile(anchor_ast_freq, 0.4)
+        
+        ast_active_mask_mel = (anchor_ast_freq >= ast_freq_threshold).float()
+        
+        # AST 주파수 마스크를 Mel에서 Linear 도메인으로 변환
+        if ast_active_mask_mel.shape[0] == self.mel_fb_m2f.shape[0]:
+            ast_active_mask_lin = ((self.mel_fb_m2f @ ast_active_mask_mel).clamp_min(0.0) > 0.2).float()
+        else:
+            ast_active_mask_lin = torch.ones(self.mel_fb_m2f.shape[1], device=ast_freq_attn.device)
+        
+        # 선택된 주파수 영역 결합
+        if high_amp_mask_lin.shape[0] != ast_active_mask_lin.shape[0]:
+            min_size = min(high_amp_mask_lin.shape[0], ast_active_mask_lin.shape[0])
+            high_amp_mask_lin = high_amp_mask_lin[:min_size]
+            ast_active_mask_lin = ast_active_mask_lin[:min_size]
+        
+        freq_boost_mask = torch.maximum(high_amp_mask_lin, ast_active_mask_lin)
+        
+        # 가중치 적용
+        if is_weak_sound:
+            freq_weight = 1.0 + 0.8 * freq_boost_mask
+        else:
+            freq_weight = 1.0 + 0.6 * freq_boost_mask
+        
+        # 기본 마스크 계산
+        M_base = omega_lin.view(-1, 1) * soft_time_mask.view(1, -1)
+        
+        # 주파수 가중치 적용
+        M_weighted = M_base * freq_weight.view(-1, 1)
+        
+        # 마스크가 실제 스펙트로그램보다 크지 않도록 제한
+        spec_magnitude = P.sqrt()
+        
+        if M_weighted.shape[0] != spec_magnitude.shape[0]:
+            min_freq = min(M_weighted.shape[0], spec_magnitude.shape[0])
+            M_weighted = M_weighted[:min_freq, :]
+            spec_magnitude = spec_magnitude[:min_freq, :]
+        
+        M_lin = torch.minimum(M_weighted, spec_magnitude)
+        
+        # 마스크 강도 조정
+        if is_weak_sound:
+            M_lin = torch.minimum(M_lin, spec_magnitude * 0.95)
+        else:
+            M_lin = torch.minimum(M_lin, spec_magnitude * 0.8)
+        
+        return M_lin
+    
+    def _single_pass_separation(self, audio: np.ndarray, used_mask_prev: Optional[torch.Tensor],
+                               prev_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor]],
+                               pass_idx: int) -> Tuple[np.ndarray, np.ndarray, float, Optional[torch.Tensor], Dict[str, Any]]:
+        """단일 패스 분리"""
+        t0 = time.time()
+        st, mag, P, phase, Xmel = self._stft_all(audio)
+        fbins, T = P.shape
+        La = int(round(ANCHOR_SEC * SR / HOP))
+
+        # 캐싱된 attention map 사용
+        time_attention, ast_freq_attn, _ = self._extract_and_cache_attention(audio, T, N_MELS)
+        
+        A_t = time_attention
+        Pur = self._purity_from_P(P)
+        Sc = self._anchor_score(A_t, Pur)
+
+        # Suppress used frames
+        if used_mask_prev is not None:
+            um = align_len_1d(used_mask_prev, T, device=Sc.device, mode="linear")
+            k = int(round((USED_DILATE_MS/1000.0)*SR/HOP)); k = ensure_odd(max(1,k))
+            ker = torch.ones(k, device=Sc.device)/k
+            um = (F.conv1d(um.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1) > 0.2).float()
+            Sc = Sc * (1 - 0.85 * um)
+
+        # Enhanced suppression of previous anchors
+        for (sa, ea, prev_w, prev_omega) in prev_anchors:
+            ca = int(((sa+ea)/2) * SR / HOP)
+            ca = max(0, min(T-1, ca))
+            sigma = int(round((ANCHOR_SUPPRESS_MS/1000.0)*SR/HOP))
+            idx = torch.arange(T, device=Sc.device) - ca
+            Sc = Sc * (1 - ANCHOR_SUPPRESS_BASE * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
+            core_s = max(0, ca - La//2); core_e = min(T, ca + La//2)
+            Sc[core_s:core_e] *= 0.2
+        
+        # Pick anchor and core regions
+        s, e, core_s_rel, core_e_rel = self._pick_anchor_region(Sc, La, TOP_PCT_CORE_IN_ANCHOR, P)
+        
+        # Create anchor block
+        Ablk = Xmel[:, s:e].clone()
+        if core_s_rel > 0:  Ablk[:, :core_s_rel] = 0
+        if core_e_rel < La: Ablk[:, core_e_rel:] = 0
+
+        # Ω 계산
+        omega = self._omega_support_with_ast_freq(Ablk, ast_freq_attn, "conservative")
+        w_bar = self._template_from_anchor_block(Ablk, omega)
+        
+        # 통합 마스킹 전략 적용
+        M_lin = self._unified_masking_strategy(Xmel, w_bar, omega, ast_freq_attn, P, s, e, "conservative")
+        
+        # Subtraction in the complex STFT domain
+        stft_full = st
+        
+        # 마스크 적용
+        if M_lin.shape[0] != mag.shape[0]:
+            min_freq = min(M_lin.shape[0], mag.shape[0])
+            M_lin = M_lin[:min_freq, :]
+            mag = mag[:min_freq, :]
+            phase = phase[:min_freq, :]
+        
+        mag_linear = mag
+        mag_masked_linear = M_lin * mag_linear
+        
+        stft_src = mag_masked_linear * torch.exp(1j * phase)
+        
+        # 잔여물 계산
+        mag_residual_linear = mag_linear - mag_masked_linear
+        mag_residual_linear = torch.maximum(mag_residual_linear, torch.zeros_like(mag_residual_linear))
+        stft_res = mag_residual_linear * torch.exp(1j * phase)
+        
+        # 에너지 검증
+        src_energy = torch.sum(torch.abs(stft_src)**2).item()
+        res_energy = torch.sum(torch.abs(stft_res)**2).item()
+        orig_energy = torch.sum(torch.abs(stft_full)**2).item()
+        total_energy = src_energy + res_energy
+        
+        # 에너지 보존 검증 및 정규화
+        energy_ratio = total_energy / (orig_energy + 1e-8)
+        if energy_ratio > 1.05:
+            scale_factor = orig_energy / (total_energy + 1e-8)
+            scale_tensor = torch.tensor(scale_factor, device=stft_src.device, dtype=stft_src.dtype)
+            stft_src = stft_src * torch.sqrt(scale_tensor)
+            stft_res = stft_res * torch.sqrt(scale_tensor)
+        elif energy_ratio < 0.95:
+            scale_factor = orig_energy / (total_energy + 1e-8)
+            scale_tensor = torch.tensor(scale_factor, device=stft_src.device, dtype=stft_src.dtype)
+            stft_src = stft_src * torch.sqrt(scale_tensor)
+            stft_res = stft_res * torch.sqrt(scale_tensor)
+
+        # Reconstruct both source and residual
+        if stft_src.shape[0] != N_FFT//2 + 1:
+            target_freq = N_FFT//2 + 1
+            if stft_src.shape[0] < target_freq:
+                pad_size = target_freq - stft_src.shape[0]
+                stft_src = F.pad(stft_src, (0, 0, 0, pad_size), mode='constant', value=0)
+                stft_res = F.pad(stft_res, (0, 0, 0, pad_size), mode='constant', value=0)
+            else:
+                stft_src = stft_src[:target_freq, :]
+                stft_res = stft_res[:target_freq, :]
+        
+        src_amp = torch.istft(stft_src, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, 
+                             window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
+        res = torch.istft(stft_res, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, 
+                          window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
+
+        # ER calculation
+        e_src = float(np.sum(src_amp**2)); e_res = float(np.sum(res**2))
+        er = e_src / (e_src + e_res + 1e-12)
+
+        # 분류 및 순수도 계산
+        cache_key = self._get_cache_key(audio)
+        cls_features = self.cls_head_cache.get(cache_key)
+        
+        if cls_features is not None:
+            if cls_features.shape[-1] == self.ast_model.config.num_labels:
+                logits = cls_features
+            else:
+                logits = self.ast_model.classifier(cls_features)
+            
+            probabilities = torch.softmax(logits, dim=-1)
+            predicted_class_id = logits.argmax(dim=-1).item()
+            confidence = probabilities[0, predicted_class_id].item()
+            
+            class_name = self.ast_model.config.id2label[predicted_class_id]
+            sound_type = self._get_sound_type(predicted_class_id)
+        else:
+            class_name, sound_type, predicted_class_id, confidence = "Unknown", "other", 0, 0.0
+
+        # Used-frame mask for next pass
+        if M_lin.shape[0] != P.shape[0]:
+            min_freq = min(M_lin.shape[0], P.shape[0])
+            M_lin = M_lin[:min_freq, :]
+            P = P[:min_freq, :]
+        
+        r_t = (M_lin * P).sum(dim=0) / (P.sum(dim=0) + 1e-8)
+        used_mask = (r_t >= USED_THRESHOLD).float()
+
+        elapsed = time.time() - t0
+        
+        info = {
+            "er": er,
+            "elapsed": elapsed,
+            "anchor": (s*HOP/SR, e*HOP/SR),
+            "core": ((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR),
+            "quality": float(M_lin.mean().item()),
+            "w_bar": w_bar,
+            "omega": omega,
+            "stopped": False,
+            "energy_ratio": energy_ratio,
+            "class_name": class_name,
+                "sound_type": sound_type,
+            "class_id": predicted_class_id,
+            "confidence": confidence
+        }
+        
+        return src_amp, res, er, used_mask, info
+    
+    def separate_audio(self, audio: np.ndarray, max_passes: int = MAX_PASSES) -> List[Dict[str, Any]]:
+        """오디오 분리 실행"""
+        if not self.is_available:
+            print("[Separator] ❌ Model not available for separation")
+            return []
+        
+        print(f"[Separator] Starting audio separation with {max_passes} passes...")
+        
+        current_audio = audio.copy()
+        used_mask_prev = None
+        prev_anchors = []
+        sources = []
+        
+        for pass_idx in range(max_passes):
+            print(f"[Separator] --- Pass {pass_idx + 1} ---")
+            
+            # 분리 실행
+            src_amp, res, er, used_mask, info = self._single_pass_separation(
+                current_audio, used_mask_prev, prev_anchors, pass_idx
+            )
+            
+            # 결과 저장
+            sources.append({
+                "pass": pass_idx + 1,
+                "class_name": info['class_name'],
+                "sound_type": info['sound_type'],
+                "confidence": info['confidence'],
+                "energy_ratio": er,
+                "anchor": info['anchor'],
+                "audio": src_amp
+            })
+            
+            # 잔여물을 다음 패스의 입력으로 사용
+            current_audio = res
+            used_mask_prev = used_mask
+            
+            # 앵커 정보 저장
+            prev_anchors.append((info['anchor'][0], info['anchor'][1], info['w_bar'], info['omega']))
+            
+            # 조기 종료 조건
+            if er < MIN_ERATIO:
+                print(f"[Separator] Early stop: Energy ratio {er:.3f} < {MIN_ERATIO}")
+                break
+        
+        print(f"[Separator] Separation completed. Found {len(sources)} sources.")
+        return sources
+    
     def is_model_available(self) -> bool:
         """모델 사용 가능 여부 확인"""
         return self.is_available
     
     def cleanup(self):
         """리소스 정리"""
-        # PyTorch 모델은 자동으로 정리됨
-        pass
+        # 캐시 정리
+        self.attention_cache.clear()
+        self.freq_attention_cache.clear()
+        self.cls_head_cache.clear()
+        self.spectrogram_cache.clear()
     
     def __enter__(self):
         return self

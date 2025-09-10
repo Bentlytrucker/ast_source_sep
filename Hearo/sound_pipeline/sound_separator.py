@@ -1213,7 +1213,7 @@ class SoundSeparator:
             sources.append(source_info)
             
             # 각 패스 완료 즉시 처리 (백엔드 전송, LED 출력)
-            print(f"[Separator] ✅ Pass {pass_idx + 1} completed: {info['class_name']} ({info['sound_type']})")
+            # 출력 간소화 - 콜백에서 처리
             
             # 콜백 함수 호출 (각 패스 완료 시마다)
             if on_pass_complete:

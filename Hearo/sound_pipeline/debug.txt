@@ -1,41 +1,143 @@
-(venv) pi@raspberrypi:~/sound/ast_source_sep/Hearo/sound_pipeline $ python dual_pipeline.py 
-🎵 Dual Thread Sound Pipeline v2.0
-============================================================
-Output directory: pipeline_output
-Model: MIT/ast-finetuned-audioset-10-10-0.4593
-Device: auto
-Backend URL: http://13.238.200.232:8000/sound-events/
-============================================================
-🚀 Starting Dual Thread Sound Pipeline...
-============================================================
-Thread 1: Fast Classification (Danger LED)
-Thread 2: Source Separation (Backend + LED)
-============================================================
+[DOA] ReSpeaker device found and initialized
+[DOA] Initial direction: 242
+3. Initializing Sound Separator...
+[Separator] Loading AST model: MIT/ast-finetuned-audioset-10-10-0.4593
+[Separator] Device: cpu
+[Separator] ✅ AST model loaded successfully
+4. Initializing LED Controller...
+[LED] ReSpeaker device found and initialized
+[LED] Started in sleep mode
+=== Fast Classification Thread Ready ===
+🚀 Fast Classification Thread started!
+✅ Fast Classification Thread started successfully!
 
-🔄 Starting Fast Classification Thread in separate terminal...
-🚀 Starting Fast Classification Thread in separate terminal...
-✅ Fast Classification Thread started in separate terminal
-/bin/sh: 1: xterm: not found
-
-🔄 Starting Source Separation Thread in separate terminal...
-🚀 Starting Source Separation Thread in separate terminal...
-✅ Source Separation Thread started in separate terminal
+🔄 Starting Source Separation Thread...
+📡 Monitoring for sounds above 100dB...
+=== Source Separation Thread Initialization ===
+1. Initializing DOA Calculator...
+🔴 Will immediately light RED LED for DANGER sounds
+Press Ctrl+C to stop
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+[DOA] ReSpeaker device found and initialized
+[DOA] Initial direction: 220
+2. Initializing Sound Separator...
+[Separator] Loading AST model: MIT/ast-finetuned-audioset-10-10-0.4593
+[Separator] Device: cpu
+Sound detected! (71.3dB) micarray wake up...
+Active recordings: 1/2
+Recording started...
+[Separator] ✅ AST model loaded successfully
+3. Initializing LED Controller...
+[LED] ReSpeaker device found and initialized
+[LED] Started in sleep mode
+=== Source Separation Thread Ready ===
+🚀 Source Separation Thread started!
+✅ Source Separation Thread started successfully!
+🔍 Processing queued audio files for separation...
 
 ✅ Dual Thread Sound Pipeline started successfully!
-📡 Both threads are now running in separate terminal windows
+📡 Will send each separated source to backend
+💡 Will activate LED for each separated source
+📡 Both threads are now running in the same terminal
+Press Ctrl+C to stop
 🔴 Fast Classification Thread: Monitors for sounds and lights RED LED for DANGER
 🔍 Source Separation Thread: Processes queued files and sends to backend
 
-💡 To stop the threads:
-   - Close the terminal windows manually
-   - Or press Enter in each terminal window
+Press Ctrl+C to stop both threads
+녹음 종료. 파일 저장 중...
+Recording completed. Active recordings: 0/2
+Saved: pipeline_output/recordings/triggered_recording_1757468839.wav
+Waiting for sounds above 100dB...
 
-Press Ctrl+C to exit this launcher
-/bin/sh: 1: xterm: not found
+🎵 Fast classifying: triggered_recording_1757468839.wav
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757468839.wav
+[Separator] Angle: 210°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Sigh (other)
+[Separator] Confidence: 0.482
+[Separator] Decibel: 46.8 dB
+[Separator] Skipping backend send for 'other' type: Sigh
+✅ OTHER: Sigh (confidence: 0.482)
+📍 Direction: 210°
+⚡ Fast classification completed in 1757468844.90s
+📤 Sent to separation thread: triggered_recording_1757468839.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
 
-^C
-🛑 Launcher stopped
-💡 Note: The separate terminal windows are still running
-   Close them manually to stop the threads
-🛑 Stopping Dual Thread Sound Pipeline...
-✅ Dual Thread Sound Pipeline stopped
+🎵 Separating: triggered_recording_1757468839.wav
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757468839.wav
+[Separator] Angle: 211°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Sigh (other)
+[Separator] Confidence: 0.482
+[Separator] Decibel: 46.8 dB
+[Separator] Skipping backend send for 'other' type: Sigh
+✅ Separation completed: 0 sources
+Sound detected! (71.8dB) micarray wake up...
+Active recordings: 1/2
+Recording started...
+녹음 종료. 파일 저장 중...
+Recording completed. Active recordings: 0/2
+Saved: pipeline_output/recordings/triggered_recording_1757468879.wav
+Waiting for sounds above 100dB...
+
+🎵 Fast classifying: triggered_recording_1757468879.wav
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757468879.wav
+[Separator] Angle: 328°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Speech (danger)
+[Separator] Confidence: 0.154
+[Separator] Decibel: 42.8 dB
+🔄 Sending to backend: None
+📤 Data: {'user_id': 6, 'sound_type': 'danger', 'sound_detail': 'Speech', 'angle': 328, 'occurred_at': '2025-09-10T01:48:04Z', 'sound_icon': 'string', 'location_image_url': 'string', 'decibel': 42.813934326171875}
+❌ Backend request error: Invalid URL 'None': No scheme supplied. Perhaps you meant https://None?
+🚨 DANGER DETECTED! Speech (confidence: 0.154)
+[LED] DANGER detected: Speech at 328° - activating red LED with blinking
+[LED] Blinked color 0xFF0000 10 times
+📍 Direction: 328°
+⚡ Fast classification completed in 1757468904.09s
+📤 Sent to separation thread: triggered_recording_1757468879.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+
+🎵 Separating: triggered_recording_1757468879.wav
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757468879.wav
+[Separator] Angle: 330°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Speech (danger)
+[Separator] Confidence: 0.154
+[Separator] Decibel: 42.8 dB
+🔄 Sending to backend: http://13.238.200.232:8000/sound-events/
+📤 Data: {'user_id': 6, 'sound_type': 'danger', 'sound_detail': 'Speech', 'angle': 330, 'occurred_at': '2025-09-10T01:48:29Z', 'sound_icon': 'string', 'location_image_url': 'string', 'decibel': 42.813934326171875}
+✅ Sent to backend: Speech (danger) at 330°
+✅ Separation completed: 0 sources
+Sound detected! (70.6dB) micarray wake up...
+Active recordings: 1/2
+Recording started...
+녹음 종료. 파일 저장 중...
+Recording completed. Active recordings: 0/2
+Saved: pipeline_output/recordings/triggered_recording_1757468926.wav
+Waiting for sounds above 100dB...
+
+🎵 Fast classifying: triggered_recording_1757468926.wav
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757468926.wav
+[Separator] Angle: 238°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Silence (other)
+[Separator] Confidence: 0.435
+[Separator] Decibel: 50.1 dB
+[Separator] Skipping backend send for 'other' type: Silence
+✅ OTHER: Silence (confidence: 0.435)
+📍 Direction: 238°
+⚡ Fast classification completed in 1757468931.85s
+📤 Sent to separation thread: triggered_recording_1757468926.wav
+Waiting for sounds above 100dB... (Press Ctrl+C to stop)
+
+🎵 Separating: triggered_recording_1757468926.wav
+[Separator] Processing audio: pipeline_output/recordings/triggered_recording_1757468926.wav
+[Separator] Angle: 330°
+[Separator] Audio length: 4.10s
+[Separator] Classified: Silence (other)
+[Separator] Confidence: 0.435
+[Separator] Decibel: 50.1 dB
+[Separator] Skipping backend send for 'other' type: Silence
+✅ Separation completed: 0 sources
+^Z

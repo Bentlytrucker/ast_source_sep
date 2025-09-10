@@ -82,11 +82,22 @@ MAX_PASSES = 3
 MIN_ERATIO = 0.005  # 더 약한 소리도 분리하도록 임계값 낮춤
 
 # 분리 강도 조정 (다중 소리 분리 개선)
-MASK_SIGMOID_CENTER = 0.6   # 시그모이드 중심값 (더 균형잡힌 분리)
-MASK_SIGMOID_SLOPE = 20.0   # 시그모이드 기울기 (부드러운 분리)
-ALPHA_ATT = 0.50            # 어텐션 가중치 (덜 공격적인 분리)
-BETA_PUR = 1.2              # 순도 가중치 (보다 보수적인 분리)
-W_E = 0.35                  # 에너지 가중치 (잔여물에 더 많은 에너지 보존)
+# Threshold 마스킹 설정
+MASK_THRESHOLD = 0.6        # 임계값 기반 마스킹 (0.3 이상이면 1, 미만이면 0)
+MASK_SOFTNESS = 0.1         # 부드러운 전환을 위한 범위 (threshold ± softness)
+USE_HARD_THRESHOLD = False  # True면 완전한 하드 threshold, False면 부드러운 threshold
+
+# 다양한 threshold 설정 (테스트용)
+THRESHOLD_PRESETS = {
+    "conservative": 0.5,    # 보수적 분리 (높은 임계값)
+    "balanced": 0.3,        # 균형잡힌 분리
+    "aggressive": 0.2,      # 공격적 분리 (낮은 임계값)
+    "very_aggressive": 0.1  # 매우 공격적 분리
+}
+CURRENT_THRESHOLD_PRESET = "balanced"  # 현재 사용할 preset
+ALPHA_ATT = 0.30            # 어텐션 가중치 (더 보수적인 분리)
+BETA_PUR = 0.8              # 순도 가중치 (더 보수적인 분리)
+W_E = 0.20                  # 에너지 가중치 (잔여물에 더 많은 에너지 보존)
 
 # 잔여물 증폭 설정
 RESIDUAL_AMPLIFY = True     # 잔여물 증폭 활성화
@@ -994,10 +1005,35 @@ class SoundSeparator:
         # 기본 마스크: 코사인 유사도 제곱으로 약화
         cos_squared = cos_t_raw ** 2
         
+        # Threshold 기반 마스킹 (sigmoid 대신)
+        base_threshold = THRESHOLD_PRESETS.get(CURRENT_THRESHOLD_PRESET, MASK_THRESHOLD)
+        
         if is_weak_sound:
-            soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * 0.9 * (cos_squared - MASK_SIGMOID_CENTER * 1.1))
+            # 약한 소리의 경우 더 낮은 임계값 사용
+            threshold = base_threshold * 0.8
+            softness = MASK_SOFTNESS * 1.2
         else:
-            soft_time_mask = torch.sigmoid(MASK_SIGMOID_SLOPE * 1.0 * (cos_squared - MASK_SIGMOID_CENTER * 1.0))
+            # 일반 소리의 경우 기본 임계값 사용
+            threshold = base_threshold
+            softness = MASK_SOFTNESS
+        
+        # Threshold 기반 마스킹
+        if USE_HARD_THRESHOLD:
+            # 완전한 하드 threshold (0 또는 1)
+            soft_time_mask = (cos_squared >= threshold).float()
+            mask_type = "HARD"
+        else:
+            # 부드러운 threshold 마스킹
+            # threshold ± softness 범위에서 선형 보간
+            mask_input = (cos_squared - (threshold - softness)) / (2 * softness)
+            soft_time_mask = torch.clamp(mask_input, 0.0, 1.0)
+            mask_type = "SOFT"
+        
+        # 디버그 정보 출력
+        mask_mean = soft_time_mask.mean().item()
+        mask_std = soft_time_mask.std().item()
+        cos_squared_mean = cos_squared.mean().item()
+        print(f"[Separator] {mask_type} threshold masking ({CURRENT_THRESHOLD_PRESET}) - Threshold: {threshold:.3f}, Cos² mean: {cos_squared_mean:.3f}, Mask mean: {mask_mean:.3f}±{mask_std:.3f}")
         
         # 앵커 영역의 진폭 주파수 선택
         anchor_max_amp = anchor_spec.max(dim=1).values
@@ -1239,6 +1275,14 @@ class SoundSeparator:
             src_amp, res, er, used_mask, info = self._single_pass_separation(
                 current_audio, used_mask_prev, prev_anchors, pass_idx
             )
+            
+            # 분리 결과 디버깅
+            if src_amp is not None:
+                src_rms = np.sqrt(np.mean(src_amp ** 2))
+                res_rms = np.sqrt(np.mean(res ** 2))
+                print(f"[Separator] Pass {pass_idx + 1} - Source RMS: {src_rms:.6f}, Residual RMS: {res_rms:.6f}, Energy ratio: {er:.6f}")
+            else:
+                print(f"[Separator] Pass {pass_idx + 1} - Source is None!")
             
             # 결과 저장
             source_info = {

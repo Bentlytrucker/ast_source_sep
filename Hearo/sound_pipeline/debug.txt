@@ -1,37 +1,26 @@
-InputChannels=6
-[Open] channels=6, rate=16000
-2. Initializing DOA Calculator...
-[DOA] ReSpeaker device found and initialized
-[DOA] Initial direction: 284
-3. Initializing Sound Separator...
-[Separator] Loading AST model: MIT/ast-finetuned-audioset-10-10-0.4593
-[Separator] Device: cpu
-[Separator] ✅ AST model loaded successfully
-4. Initializing LED Controller...
-[LED] ReSpeaker device found and initialized
-[LED] Started in sleep mode
-=== Single Thread Pipeline Ready ===
-
-✅ Single Thread Sound Pipeline started successfully!
-📡 Monitoring for sounds above 100dB...
-🔍 Will process audio separation and send to backend
-💡 Will activate LED for each separated source
-⏭️ Will skip duplicate classes
-
 Press Ctrl+C to stop
 Waiting for sounds above 100dB... (Press Ctrl+C to stop)
-Sound detected! (73.6dB) micarray wake up...
+Sound detected! (80.2dB) micarray wake up...
 Active recordings: 1/2
 Recording started...
 녹음 종료. 파일 저장 중...
 Recording completed. Active recordings: 0/2
-Saved: pipeline_output/recordings/triggered_recording_1757470991.wav
+Saved: pipeline_output/recordings/triggered_recording_1757471216.wav
 Waiting for sounds above 100dB...
 
-🎵 Processing: triggered_recording_1757470991.wav
-📍 Direction: 289°
+🎵 Processing: triggered_recording_1757471216.wav
+📍 Direction: 9°
 🔍 Starting source separation...
 [Separator] Starting audio separation with 3 passes...
 [Separator] --- Pass 1 ---
-❌ Separation error: stft(torch.ShortTensor[65936], n_fft=400, hop_length=160, win_length=400, window=torch.FloatTensor{[400]}, normalized=0, onesided=None, return_complex=1, align_to_window=None) : expected a tensor of floating point or complex values
-❌ Separation failed: stft(torch.ShortTensor[65936], n_fft=400, hop_length=160, win_length=400, window=torch.FloatTensor{[400]}, normalized=0, onesided=None, return_complex=1, align_to_window=None) : expected a tensor of floating point or complex values
+[Separator] --- Pass 2 ---
+[Separator] --- Pass 3 ---
+[Separator] Early stop: Energy ratio 0.000 < 0.01
+[Separator] Separation completed. Found 3 sources.
+✅ Separation completed: 3 sources
+==================================================
+🎵 PASS 1: Speech (danger) - Confidence: 0.531
+📡 Sending to backend: Speech at 9°
+📡 Sending to backend: Speech at 9°
+💡 Activating LED: Speech (danger)
+[LED] DANGER detected: Speech at 9° - activating red LED with blinking

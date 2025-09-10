@@ -53,8 +53,6 @@ class SoundTrigger:
         # 안 되면 사용 가능한 최대 입력 채널로 열고, 최종적으로 1채널 변환 저장
         self.desired_channels = 6 if self.max_in_ch >= 6 else self.max_in_ch if self.max_in_ch > 0 else 1
         
-        print(f"[Trigger] Debug: Device max input channels: {self.max_in_ch}")
-        print(f"[Trigger] Debug: Desired channels: {self.desired_channels}")
         
         info = self.p.get_device_info_by_index(self.device_index)
         print(f"[Device] index={self.device_index}, name='{info.get('name')}', maxInputChannels={self.max_in_ch}")
@@ -105,28 +103,18 @@ class SoundTrigger:
             interleaved = interleaved[:usable_len]
         x = interleaved.reshape(-1, num_channels)
 
-        # 디버그: 채널별 데이터 확인
-        print(f"[Trigger] Debug: Interleaved data shape: {x.shape}")
-        print(f"[Trigger] Debug: Channel 0 range: {x[:, 0].min()} to {x[:, 0].max()}")
-        if num_channels >= 6:
-            print(f"[Trigger] Debug: Channel 5 range: {x[:, 5].min()} to {x[:, 5].max()}")
-            print(f"[Trigger] Debug: Channel 5 non-zero: {np.count_nonzero(x[:, 5])} / {len(x[:, 5])}")
-
         # 채널 5가 있으면 (ReSpeaker post-processed/beamformed) 그 채널만 사용
         if num_channels >= 6:
             # 채널 5가 모두 0인지 확인
             if np.all(x[:, 5] == 0):
-                print(f"[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3")
                 # 채널 0-3 (마이크 채널) 평균 사용
                 mono = np.mean(x[:, :4], axis=1).astype(np.int16)
             else:
                 mono = x[:, 5].astype(np.int16)
-                print(f"[Trigger] Debug: Using channel 5, mono range: {mono.min()} to {mono.max()}")
         else:
             # 일반 마이크 채널 평균 (가능하면 앞쪽 4채널만 평균)
             mic_cols = min(num_channels, 4)
             mono = np.mean(x[:, :mic_cols], axis=1).astype(np.int16)
-            print(f"[Trigger] Debug: Averaging {mic_cols} channels, mono range: {mono.min()} to {mono.max()}")
         
         return mono
 
@@ -224,16 +212,6 @@ class SoundTrigger:
                 if recording:
                     mono = self._to_mono_int16(data_i16, self.desired_channels)
                     
-                    # 디버그: 모노 데이터 검증
-                    if samples_collected == 0:  # 첫 번째 청크만 디버그
-                        print(f"[Trigger] Debug: First recording chunk")
-                        print(f"[Trigger] Debug: Input data_i16 range: {data_i16.min()} to {data_i16.max()}")
-                        print(f"[Trigger] Debug: Input data_i16 mean: {data_i16.mean():.1f}, std: {data_i16.std():.1f}")
-                        print(f"[Trigger] Debug: Desired channels: {self.desired_channels}")
-                        print(f"[Trigger] Debug: Mono range: {mono.min()} to {mono.max()}")
-                        print(f"[Trigger] Debug: Mono mean: {mono.mean():.1f}, std: {mono.std():.1f}")
-                        print(f"[Trigger] Debug: Mono non-zero samples: {np.count_nonzero(mono)} / {len(mono)}")
-                    
                     frames_bytes.append(mono.tobytes())
                     samples_collected += len(mono)
 
@@ -246,21 +224,7 @@ class SoundTrigger:
                         output_filename = os.path.join(self.output_dir, f"triggered_recording_{timestamp}.wav")
                         
                         # WAV 파일 저장
-                        print(f"[Trigger] Debug: Saving WAV file...")
-                        print(f"[Trigger] Debug: Total frames collected: {len(frames_bytes)}")
-                        print(f"[Trigger] Debug: Total samples: {samples_collected}")
-                        
-                        # 저장할 데이터 검증
                         all_frames_data = b''.join(frames_bytes)
-                        print(f"[Trigger] Debug: Total bytes to save: {len(all_frames_data)}")
-                        print(f"[Trigger] Debug: First 20 bytes: {all_frames_data[:20]}")
-                        print(f"[Trigger] Debug: Last 20 bytes: {all_frames_data[-20:]}")
-                        
-                        # 바이트를 int16으로 변환하여 검증
-                        if len(all_frames_data) >= 4:
-                            first_samples = np.frombuffer(all_frames_data[:40], dtype=np.int16)
-                            print(f"[Trigger] Debug: First 20 samples: {first_samples}")
-                            print(f"[Trigger] Debug: First samples range: {first_samples.min()} to {first_samples.max()}")
                         
                         wf = wave.open(output_filename, 'wb')
                         wf.setnchannels(1)

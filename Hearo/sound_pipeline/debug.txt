@@ -28,7 +28,14 @@ Thread 2: Source Separation (Backend + LED)
 
 💡 To stop the threads:
    - Close the terminal windows manually
-/bin/sh: 1:    - Or press Enter in each terminal window
-xterm: not found
+   - Or press Enter in each terminal window
 
 Press Ctrl+C to exit this launcher
+/bin/sh: 1: xterm: not found
+
+^C
+🛑 Launcher stopped
+💡 Note: The separate terminal windows are still running
+   Close them manually to stop the threads
+🛑 Stopping Dual Thread Sound Pipeline...
+✅ Dual Thread Sound Pipeline stopped

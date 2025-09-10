@@ -114,8 +114,14 @@ class SoundTrigger:
 
         # 채널 5가 있으면 (ReSpeaker post-processed/beamformed) 그 채널만 사용
         if num_channels >= 6:
-            mono = x[:, 5].astype(np.int16)
-            print(f"[Trigger] Debug: Using channel 5, mono range: {mono.min()} to {mono.max()}")
+            # 채널 5가 모두 0인지 확인
+            if np.all(x[:, 5] == 0):
+                print(f"[Trigger] Debug: Channel 5 is all zeros, using mic channels 0-3")
+                # 채널 0-3 (마이크 채널) 평균 사용
+                mono = np.mean(x[:, :4], axis=1).astype(np.int16)
+            else:
+                mono = x[:, 5].astype(np.int16)
+                print(f"[Trigger] Debug: Using channel 5, mono range: {mono.min()} to {mono.max()}")
         else:
             # 일반 마이크 채널 평균 (가능하면 앞쪽 4채널만 평균)
             mic_cols = min(num_channels, 4)

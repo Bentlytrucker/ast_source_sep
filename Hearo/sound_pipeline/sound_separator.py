@@ -275,50 +275,34 @@ class SoundSeparator:
         """라즈베리 파이 호환 dB 계산 방법"""
         try:
             if len(audio) == 0:
-                print(f"[Separator] Debug: Empty audio data")
                 return -np.inf, -np.inf, -np.inf
-            
-            # 디버그: 오디오 데이터 정보
-            print(f"[Separator] Debug: Audio data range: {audio.min()} to {audio.max()}")
-            print(f"[Separator] Debug: Audio data mean: {audio.mean():.1f}, std: {audio.std():.1f}")
-            print(f"[Separator] Debug: Audio data type: {audio.dtype}")
-            print(f"[Separator] Debug: Audio data shape: {audio.shape}")
             
             # 안전한 자료형 변환 (라즈베리 파이 호환)
             if audio.dtype == np.int16:
                 # int16을 float64로 변환하여 정밀도 향상
                 audio_float = audio.astype(np.float64)
-                print(f"[Separator] Debug: Converted int16 to float64")
             elif audio.dtype == np.float32:
                 audio_float = audio.astype(np.float64)
-                print(f"[Separator] Debug: Converted float32 to float64")
             elif audio.dtype == np.float64:
                 audio_float = audio.copy()
-                print(f"[Separator] Debug: Using float64 directly")
             else:
                 audio_float = audio.astype(np.float64)
-                print(f"[Separator] Debug: Converted {audio.dtype} to float64")
             
             # 데이터 검증
             if np.all(audio_float == 0):
-                print(f"[Separator] Debug: All audio data is zero")
                 return -np.inf, -np.inf, -np.inf
             
             # RMS 계산 (Sound Trigger와 동일한 방식)
             rms = np.sqrt(np.mean(audio_float**2))
-            print(f"[Separator] Debug: RMS: {rms:.6f}")
             
             if rms <= 0:
-                print(f"[Separator] Debug: RMS is zero or negative: {rms}")
                 return -np.inf, -np.inf, -np.inf
             
             # dB 변환 (20 * log10(rms)) - Sound Trigger와 동일
             db = 20 * np.log10(rms)
-            print(f"[Separator] Debug: Calculated dB: {db:.3f}")
             
             # 유효한 dB 값인지 확인
             if np.isnan(db) or np.isinf(db):
-                print(f"[Separator] Debug: dB is NaN or inf: {db}")
                 return -np.inf, -np.inf, -np.inf
             
             # min, max dB 계산 (안전한 방법)
@@ -339,11 +323,8 @@ class SoundSeparator:
             else:
                 db_min = db_max = db
             
-            print(f"[Separator] Debug: dB range: {db_min:.1f} to {db_max:.1f} dB (mean: {db:.1f} dB)")
-            
             # 최종 검증
             if np.isnan(db_min) or np.isinf(db_min) or np.isnan(db_max) or np.isinf(db_max) or np.isnan(db) or np.isinf(db):
-                print(f"[Separator] Debug: Final validation failed - returning -inf")
                 return -np.inf, -np.inf, -np.inf
             
             return db_min, db_max, db

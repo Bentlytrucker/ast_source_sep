@@ -164,6 +164,7 @@ class FastClassificationThread:
         self._initialize_components()
         self.is_running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.daemon = True
         self.thread.start()
         print("✅ Fast Classification Thread started successfully!")
     
@@ -363,6 +364,7 @@ class SourceSeparationThread:
         self._initialize_components()
         self.is_running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.daemon = True
         self.thread.start()
         print("✅ Source Separation Thread started successfully!")
     
@@ -619,17 +621,26 @@ if __name__ == "__main__":
         print("\n🔄 Starting Source Separation Thread...")
         self.source_separation_thread.start()
         
+        # 스레드들이 백그라운드에서 계속 실행되도록 설정
+        self.fast_classification_thread.thread.daemon = True
+        self.source_separation_thread.thread.daemon = True
+        
         print("\n✅ Dual Thread Sound Pipeline started successfully!")
         print("📡 Both threads are now running in the same terminal")
         print("🔴 Fast Classification Thread: Monitors for sounds and lights RED LED for DANGER")
         print("🔍 Source Separation Thread: Processes queued files and sends to backend")
         print("\nPress Ctrl+C to stop both threads")
+        print("💡 Both threads will continue running in background...")
         
         try:
-            # 메인 스레드에서 대기
-            while self.is_running:
-                time.sleep(1.0)
-                
+            # 메인 스레드에서 대기 (스레드들이 백그라운드에서 계속 실행)
+            print("💡 Main launcher will exit, but threads continue running in background")
+            print("💡 To stop threads: kill the Python processes or restart system")
+            
+            # 잠시 대기 후 메인 스레드 종료 (스레드들은 백그라운드에서 계속 실행)
+            time.sleep(2.0)
+            print("✅ Launcher exited. Threads are running in background.")
+            
         except KeyboardInterrupt:
             print("\n🛑 Stopping pipeline...")
             self.stop()

@@ -12,7 +12,8 @@ import time
 import threading
 import queue
 import argparse
-from typing import Optional, Dict, Any
+import subprocess
+from typing import Optional, Dict, Any, Set
 
 # 파이프라인 모듈들 import
 from sound_trigger import SoundTrigger
@@ -207,12 +208,16 @@ class SourceSeparationThread:
         self.sound_separator = None
         self.led_controller = None
         
+        # 중복 클래스 전송 방지를 위한 세트
+        self.sent_classes: Set[str] = set()
+        
         # 통계
         self.stats = {
             "total_processed": 0,
             "successful_separations": 0,
             "backend_sends": 0,
-            "led_activations": 0
+            "led_activations": 0,
+            "duplicate_skips": 0
         }
     
     def _initialize_components(self):
@@ -236,24 +241,32 @@ class SourceSeparationThread:
         print("=== Source Separation Thread Ready ===")
     
     def _process_separation(self, audio_file: str) -> Dict[str, Any]:
-        """음원 분리 및 각 패스마다 백엔드 전송"""
+        """음원 분리 및 각 패스마다 백엔드 전송 (중복 클래스 전송 방지)"""
         try:
             # 1. Calculate DOA
             angle = self.doa_calculator.get_direction_with_retry(max_retries=2)
             if angle is None:
                 angle = 0
             
-            # 2. Sound separation with backend sending
-            separated_output_dir = os.path.join(self.output_dir, "separated")
-            result = self.sound_separator.process_audio(audio_file, angle, separated_output_dir)
+            # 2. Sound separation (파일 저장 안함)
+            result = self.sound_separator.process_audio(audio_file, angle, None)  # No output dir
             
             if result["success"]:
                 separated_sources = result.get("separated_sources", [])
                 
-                # 3. 각 분리된 소리마다 백엔드 전송 및 LED 활성화
+                # 3. 각 분리된 소리마다 백엔드 전송 및 LED 활성화 (중복 클래스 스킵)
                 for i, source in enumerate(separated_sources):
                     if source.get('audio') is not None:
-                        print(f"🎵 Processing separated source {i+1}: {source['class_name']}")
+                        class_name = source['class_name']
+                        sound_type = source['sound_type']
+                        
+                        print(f"🎵 Processing separated source {i+1}: {class_name}")
+                        
+                        # 중복 클래스 체크
+                        if class_name in self.sent_classes:
+                            print(f"⏭️ Skipping duplicate class: {class_name}")
+                            self.stats["duplicate_skips"] += 1
+                            continue
                         
                         # 백엔드 전송
                         if self.backend_url:
@@ -262,10 +275,13 @@ class SourceSeparationThread:
                         
                         # LED 활성화 (형식에 맞춰서)
                         if self.led_controller:
-                            self.led_controller.activate_led(angle, source['class_name'], source['sound_type'])
+                            self.led_controller.activate_led(angle, class_name, sound_type)
                             self.stats["led_activations"] += 1
                         
-                        print(f"✅ Source {i+1} processed: {source['class_name']} ({source['sound_type']})")
+                        # 전송된 클래스 기록
+                        self.sent_classes.add(class_name)
+                        
+                        print(f"✅ Source {i+1} processed: {class_name} ({sound_type})")
                 
                 self.stats["successful_separations"] += 1
                 return result
@@ -373,6 +389,8 @@ class SourceSeparationThread:
         print(f"Successful separations: {self.stats['successful_separations']}")
         print(f"Backend sends: {self.stats['backend_sends']}")
         print(f"LED activations: {self.stats['led_activations']}")
+        print(f"Duplicate skips: {self.stats['duplicate_skips']}")
+        print(f"Sent classes: {len(self.sent_classes)}")
         print("=====================================\n")
 
 
@@ -406,8 +424,138 @@ class DualSoundPipeline:
         # 상태 관리
         self.is_running = False
     
+    def _start_fast_classification_terminal(self):
+        """Fast Classification Thread를 별도 터미널에서 실행"""
+        print("🚀 Starting Fast Classification Thread in separate terminal...")
+        
+        # 현재 디렉토리 경로
+        current_dir = os.getcwd()
+        
+        # Fast Classification Thread 실행 스크립트 생성
+        fast_script = f"""
+import sys
+import os
+sys.path.append('{current_dir}')
+
+from dual_pipeline import FastClassificationThread
+
+def main():
+    print("🚀 Fast Classification Thread v2.0")
+    print("=" * 50)
+    print("Output directory: {self.output_dir}")
+    print("Model: {self.model_name}")
+    print("Device: {self.device}")
+    print("=" * 50)
+    
+    # Fast Classification Thread 시작
+    thread = FastClassificationThread('{self.output_dir}', '{self.model_name}', '{self.device}')
+    
+    try:
+        thread.start()
+        print("\\n✅ Fast Classification Thread started successfully!")
+        print("📡 Monitoring for sounds above 100dB...")
+        print("🔴 Will immediately light RED LED for DANGER sounds")
+        print("Press Enter to stop...")
+        
+        # 사용자 입력 대기
+        input()
+        
+    except KeyboardInterrupt:
+        print("\\n🛑 Stopping Fast Classification Thread...")
+    finally:
+        thread.stop()
+        print("✅ Fast Classification Thread stopped")
+
+if __name__ == "__main__":
+    main()
+"""
+        
+        # 임시 스크립트 파일 생성
+        fast_script_path = os.path.join(self.output_dir, "fast_classification_temp.py")
+        with open(fast_script_path, 'w', encoding='utf-8') as f:
+            f.write(fast_script)
+        
+        # 터미널에서 실행
+        if os.name == 'nt':  # Windows
+            cmd = f'start "Fast Classification Thread" cmd /k "cd /d {current_dir} && python {fast_script_path}"'
+        else:  # Linux/Mac
+            # Raspberry Pi에서는 xterm 사용
+            cmd = f'xterm -title "Fast Classification Thread" -e "cd {current_dir} && python {fast_script_path}; bash"'
+        
+        try:
+            subprocess.Popen(cmd, shell=True)
+            print("✅ Fast Classification Thread started in separate terminal")
+        except Exception as e:
+            print(f"❌ Failed to start Fast Classification Thread: {e}")
+    
+    def _start_source_separation_terminal(self):
+        """Source Separation Thread를 별도 터미널에서 실행"""
+        print("🚀 Starting Source Separation Thread in separate terminal...")
+        
+        # 현재 디렉토리 경로
+        current_dir = os.getcwd()
+        
+        # Source Separation Thread 실행 스크립트 생성
+        sep_script = f"""
+import sys
+import os
+sys.path.append('{current_dir}')
+
+from dual_pipeline import SourceSeparationThread
+
+def main():
+    print("🚀 Source Separation Thread v2.0")
+    print("=" * 50)
+    print("Output directory: {self.output_dir}")
+    print("Model: {self.model_name}")
+    print("Device: {self.device}")
+    print("Backend URL: {self.backend_url}")
+    print("=" * 50)
+    
+    # Source Separation Thread 시작
+    thread = SourceSeparationThread('{self.output_dir}', '{self.model_name}', '{self.device}', '{self.backend_url}')
+    
+    try:
+        thread.start()
+        print("\\n✅ Source Separation Thread started successfully!")
+        print("🔍 Processing queued audio files for separation...")
+        print("📡 Will send each separated source to backend")
+        print("💡 Will activate LED for each separated source")
+        print("Press Enter to stop...")
+        
+        # 사용자 입력 대기
+        input()
+        
+    except KeyboardInterrupt:
+        print("\\n🛑 Stopping Source Separation Thread...")
+    finally:
+        thread.stop()
+        print("✅ Source Separation Thread stopped")
+
+if __name__ == "__main__":
+    main()
+"""
+        
+        # 임시 스크립트 파일 생성
+        sep_script_path = os.path.join(self.output_dir, "source_separation_temp.py")
+        with open(sep_script_path, 'w', encoding='utf-8') as f:
+            f.write(sep_script)
+        
+        # 터미널에서 실행
+        if os.name == 'nt':  # Windows
+            cmd = f'start "Source Separation Thread" cmd /k "cd /d {current_dir} && python {sep_script_path}"'
+        else:  # Linux/Mac
+            # Raspberry Pi에서는 xterm 사용
+            cmd = f'xterm -title "Source Separation Thread" -e "cd {current_dir} && python {sep_script_path}; bash"'
+        
+        try:
+            subprocess.Popen(cmd, shell=True)
+            print("✅ Source Separation Thread started in separate terminal")
+        except Exception as e:
+            print(f"❌ Failed to start Source Separation Thread: {e}")
+    
     def start(self):
-        """파이프라인 시작"""
+        """파이프라인 시작 - 두 개 터미널로 분리 실행"""
         if self.is_running:
             print("⚠️ Pipeline is already running")
             return
@@ -418,26 +566,24 @@ class DualSoundPipeline:
         print("Thread 2: Source Separation (Backend + LED)")
         print("=" * 60)
         
-        # 스레드들 초기화
-        self.fast_classification_thread = FastClassificationThread(
-            self.output_dir, self.model_name, self.device
-        )
-        self.source_separation_thread = SourceSeparationThread(
-            self.output_dir, self.model_name, self.device, self.backend_url
-        )
-        
-        # 스레드들 시작
+        # 두 개 터미널로 분리 실행
         self.is_running = True
         
-        print("\n🔄 Starting Fast Classification Thread...")
-        self.fast_classification_thread.start()
+        print("\n🔄 Starting Fast Classification Thread in separate terminal...")
+        self._start_fast_classification_terminal()
+        time.sleep(2)  # 잠시 대기
         
-        print("\n🔄 Starting Source Separation Thread...")
-        self.source_separation_thread.start()
+        print("\n🔄 Starting Source Separation Thread in separate terminal...")
+        self._start_source_separation_terminal()
         
         print("\n✅ Dual Thread Sound Pipeline started successfully!")
-        print("📡 Both threads are now running independently")
-        print("Press Ctrl+C to stop")
+        print("📡 Both threads are now running in separate terminal windows")
+        print("🔴 Fast Classification Thread: Monitors for sounds and lights RED LED for DANGER")
+        print("🔍 Source Separation Thread: Processes queued files and sends to backend")
+        print("\n💡 To stop the threads:")
+        print("   - Close the terminal windows manually")
+        print("   - Or press Enter in each terminal window")
+        print("\nPress Ctrl+C to exit this launcher")
         
         try:
             # 메인 스레드에서 대기
@@ -445,7 +591,9 @@ class DualSoundPipeline:
                 time.sleep(1.0)
                 
         except KeyboardInterrupt:
-            print("\n🛑 Stopping pipeline...")
+            print("\n🛑 Launcher stopped")
+            print("💡 Note: The separate terminal windows are still running")
+            print("   Close them manually to stop the threads")
             self.stop()
     
     def stop(self):
@@ -456,12 +604,17 @@ class DualSoundPipeline:
         
         print("🛑 Stopping Dual Thread Sound Pipeline...")
         
-        # 스레드들 중지
-        if self.fast_classification_thread:
-            self.fast_classification_thread.stop()
-        
-        if self.source_separation_thread:
-            self.source_separation_thread.stop()
+        # 임시 스크립트 파일들 정리
+        try:
+            fast_script_path = os.path.join(self.output_dir, "fast_classification_temp.py")
+            sep_script_path = os.path.join(self.output_dir, "source_separation_temp.py")
+            
+            if os.path.exists(fast_script_path):
+                os.remove(fast_script_path)
+            if os.path.exists(sep_script_path):
+                os.remove(sep_script_path)
+        except:
+            pass
         
         self.is_running = False
         print("✅ Dual Thread Sound Pipeline stopped")
@@ -471,24 +624,17 @@ class DualSoundPipeline:
         if self.is_running:
             self.stop()
         
-        # 컴포넌트 정리
-        if self.fast_classification_thread:
-            if self.fast_classification_thread.sound_trigger:
-                self.fast_classification_thread.sound_trigger.cleanup()
-            if self.fast_classification_thread.doa_calculator:
-                self.fast_classification_thread.doa_calculator.cleanup()
-            if self.fast_classification_thread.sound_separator:
-                self.fast_classification_thread.sound_separator.cleanup()
-            if self.fast_classification_thread.led_controller:
-                self.fast_classification_thread.led_controller.cleanup()
-        
-        if self.source_separation_thread:
-            if self.source_separation_thread.doa_calculator:
-                self.source_separation_thread.doa_calculator.cleanup()
-            if self.source_separation_thread.sound_separator:
-                self.source_separation_thread.sound_separator.cleanup()
-            if self.source_separation_thread.led_controller:
-                self.source_separation_thread.led_controller.cleanup()
+        # 임시 스크립트 파일들 정리
+        try:
+            fast_script_path = os.path.join(self.output_dir, "fast_classification_temp.py")
+            sep_script_path = os.path.join(self.output_dir, "source_separation_temp.py")
+            
+            if os.path.exists(fast_script_path):
+                os.remove(fast_script_path)
+            if os.path.exists(sep_script_path):
+                os.remove(sep_script_path)
+        except:
+            pass
     
     def __enter__(self):
         return self

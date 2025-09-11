@@ -1,12 +1,11 @@
 # ast_source_sep
-# Cached AST-guided Source Separator
+# AST-guided Source Separator
 
-AST(Audio Spectrogram Transformer) 모델을 활용한 지능형 음원 분리 시스템입니다. 주파수 어텐션 맵 캐싱을 통해 AST 모델 호출을 최적화하고, 소리 크기에 따른 적응적 분리 전략을 제공합니다.
+AST(Audio Spectrogram Transformer) 모델을 활용한 음원 분리 시스템 주파수 어텐션 맵 캐싱을 통해 AST 모델 호출을 최적화하고, 소리 크기에 따른 적응적 분리 전략을 제공.
 <img src="debug_pass_1.png" width="800" alt="분리 시각화">
 
 ## 🎯 주요 특징
 
-- **캐싱 최적화**: AST 모델 호출을 3번으로 제한하여 성능 향상
 - **적응적 분리**: 소리 크기에 따른 보수적/공격적 분리 전략
 - **실시간 분류**: 분리된 소리를 실시간으로 분류 및 백엔드 전송
 - **디버그 시각화**: 분리 과정의 상세한 시각화 제공

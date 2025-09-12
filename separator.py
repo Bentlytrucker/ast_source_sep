@@ -433,16 +433,41 @@ def purity_from_P(P: torch.Tensor) -> torch.Tensor:
 def anchor_score(A_t: torch.Tensor, Pur: torch.Tensor) -> torch.Tensor:
     return norm01(smooth1d((A_t.clamp(0,1)**ALPHA_ATT) * (Pur.clamp(0,1)**BETA_PUR), SMOOTH_T))
 
-def pick_anchor_region(score: torch.Tensor, La: int, core_pct: float) -> Tuple[int, int, int, int]:
+def pick_anchor_region(score: torch.Tensor, La: int, core_pct: float, 
+                      previous_anchors: List[Tuple[int, int]] = None) -> Tuple[int, int, int, int]:
     """
     Finds the highest score peak, creates an anchor around it, and then finds
     the core region within that anchor, also centered on the peak.
+    Avoids previous anchor regions to prevent re-selection.
     Returns: (anchor_start, anchor_end, core_start_relative, core_end_relative)
     """
     T = score.numel()
 
-    # 1. Find the index of the absolute highest score.
-    peak_idx = int(torch.argmax(score).item())
+    # Create mask to avoid previous anchor regions
+    avoid_mask = torch.ones(T, dtype=torch.bool, device=score.device)
+    if previous_anchors:
+        for prev_s, prev_e in previous_anchors:
+            # 이전 앵커 구간과 그 주변을 피하도록 마스크 생성
+            # 앵커 길이의 1.5배만큼 확장하여 피하기
+            buffer = int(La * 1.5)
+            avoid_start = max(0, prev_s - buffer)
+            avoid_end = min(T, prev_e + buffer)
+            avoid_mask[avoid_start:avoid_end] = False
+            print(f"    🚫 Avoiding previous anchor region: {prev_s}-{prev_e} (extended: {avoid_start}-{avoid_end})")
+    
+    # 1. Find the index of the highest score that avoids previous anchors
+    if previous_anchors and avoid_mask.sum() > 0:
+        candidate_score = score.clone()
+        candidate_score[~avoid_mask] = -float('inf')
+        if candidate_score.max() > -float('inf'):
+            peak_idx = int(torch.argmax(candidate_score).item())
+            print(f"    ✅ Selected new anchor region avoiding {len(previous_anchors)} previous anchors")
+        else:
+            # 모든 영역이 피해야 할 영역이면, 피해야 할 영역을 무시하고 최고점 선택
+            print(f"    ⚠️ All regions are avoided, selecting best available region")
+            peak_idx = int(torch.argmax(score).item())
+    else:
+        peak_idx = int(torch.argmax(score).item())
 
     # 2. Calculate the anchor window centered on the peak.
     anchor_s = max(0, min(peak_idx - (La // 2), T - La))
@@ -637,7 +662,8 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
                 used_mask_prev: Optional[torch.Tensor],
                 prev_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor]],
                 pass_idx: int, out_dir: Optional[str], prev_energy_ratio: float = 1.0,
-                separated_time_regions: List[dict] = None):
+                separated_time_regions: List[dict] = None,
+                previous_anchors: List[Tuple[int, int]] = None):
 
     t0 = time.time()
     st, mag, P, phase, Xmel = stft_all(audio, mel_fb_m2f)
@@ -698,8 +724,8 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         core_s = max(0, ca - La//2); core_e = min(T, ca + La//2)
         Sc[core_s:core_e] *= 0.2
     
-    # Pick anchor and core regions, centered on the peak score
-    s, e, core_s_rel, core_e_rel = pick_anchor_region(Sc, La, TOP_PCT_CORE_IN_ANCHOR)
+    # Pick anchor and core regions, centered on the peak score (avoiding previous anchors)
+    s, e, core_s_rel, core_e_rel = pick_anchor_region(Sc, La, TOP_PCT_CORE_IN_ANCHOR, previous_anchors)
     
     # Create anchor block (Ablk) based on the core indices
     Ablk = Xmel[:, s:e].clone()
@@ -845,7 +871,8 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         "db_max": db_max,
         "db_mean": db_mean,
         "src_time_mask": src_time_mask,  # 분리된 시간 마스크
-        "src_time_indices": src_time_indices  # 분리된 시간 인덱스
+        "src_time_indices": src_time_indices,  # 분리된 시간 인덱스
+        "anchor_region": (s, e)  # 앵커 구간 정보 추가
     }
     return src_amp, res, er, used_mask, info
 
@@ -898,6 +925,7 @@ def main():
     saved = 0
     prev_energy_ratio = 1.0
     separated_time_regions = []  # 이전에 분리된 시간대 정보 저장
+    previous_anchors = []  # 이전 패스에서 사용된 앵커 구간 정보
 
     for i in range(max(1, args.passes)):
         print(f"\n▶ Pass {i+1}/{args.passes}")
@@ -906,7 +934,8 @@ def main():
             used_mask_prev, prev_anchors,
             pass_idx=i, out_dir=None if args.no_debug else args.output,
             prev_energy_ratio=prev_energy_ratio,
-            separated_time_regions=separated_time_regions
+            separated_time_regions=separated_time_regions,
+            previous_anchors=previous_anchors
         )
         
         if result[0] is None:
@@ -957,6 +986,11 @@ def main():
                     'confidence': confidence
                 })
                 print(f"  📊 Collected {len(separated_time_regions)} separated time regions for energy suppression")
+            
+            # 앵커 구간 정보 수집
+            if 'anchor_region' in info:
+                previous_anchors.append(info['anchor_region'])
+                print(f"  📍 Added anchor region {info['anchor_region']} to avoid list")
 
         # Peak Normalization for clear output
         peak = np.max(np.abs(src))

@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AST-guided Source Separator
-A unified pipeline for audio source separation using AST (Audio Spectrogram Transformer) model:
+AST-guided Source Separator (Final Integrated Version)
+A unified pipeline combining the best features from separator.py and test.py:
 - Enhanced Frequency Attention with AST model integration
 - Adaptive masking strategy with conservative and aggressive modes
-- Energy conservation with fallback mechanisms
+- Energy conservation with automatic adjustment mechanisms
 - Comprehensive classification and analysis
 - Multi-pass separation with intelligent anchor selection
+- Energy suppression for previously separated regions
+- Separation skipping for high confidence/purity sources
+- Robust error handling and dimension management
 """
 
-import os, time, warnings, argparse
-from typing import List, Tuple, Optional
+import os
+import time
+import warnings
+import argparse
+from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -23,103 +29,78 @@ warnings.filterwarnings("ignore")
 torch.set_num_threads(4)
 
 # =========================
-# Config
-
-
+# Global Constants
 # =========================
-SR                = 16000  # 샘플링 레이트 (Hz) - AST 모델과 호환되는 16kHz
-WIN_SEC           = 4.096  # 분석 윈도우 길이 (초) - 4초 고정 윈도우로 처리
-ANCHOR_SEC        = 0.512  # 앵커 구간 길이 (초) - 512ms 앵커로 소스 특성 추출
-L_FIXED           = int(round(WIN_SEC * SR))  # 고정 오디오 길이 (샘플 수)
+SR = 16000
+WIN_SEC = 4.096
+ANCHOR_SEC = 0.512
+L_FIXED = int(round(WIN_SEC * SR))
 
-# === Final Output Processing ===
-NORMALIZE_TARGET_PEAK = 0.95  # 최대 볼륨의 95% 크기로 표준화 (클리핑 방지)
-RESIDUAL_CLIP_THR = 0.0005    # 최종 잔여물의 진폭이 이 값보다 작으면 0으로 만듦 (노이즈 제거)
+N_FFT, HOP, WINLEN = 400, 160, 400
+WINDOW = torch.hann_window(WINLEN)
+N_MELS = 128
+EPS = 1e-10
 
-# === Adaptive Masking Strategy ===
-USE_ADAPTIVE_STRATEGY = True   # 적응적 마스킹 전략 사용 여부
-FALLBACK_THRESHOLD = 0.1       # 에너지 보존 실패 시 fallback 전략 사용 임계값
+# Processing parameters
+SMOOTH_T = 19
+ALPHA_ATT = 0.80
+BETA_PUR = 1.20
+W_E = 0.30
+TOP_PCT_CORE_IN_ANCHOR = 0.50
 
-# === Soft Masking Parameters ===
-MASK_SIGMOID_CENTER = 0.6   # 마스크가 0.5가 되는 cosΩ 값 (중심점) - 낮을수록 더 강한 마스크
-MASK_SIGMOID_SLOPE  = 20.0  # S-커브의 경사 - 높을수록 하드 마스크처럼 날카로워짐
+# Masking parameters
+MASK_SIGMOID_CENTER = 0.6
+MASK_SIGMOID_SLOPE = 20.0
 
-# STFT Parameters (10ms hop)
-N_FFT, HOP, WINLEN = 400, 160, 400  # FFT 크기, 홉 길이, 윈도우 길이 (10ms 홉으로 실시간 처리)
-WINDOW = torch.hann_window(WINLEN)  # Hann 윈도우 함수
-EPS = 1e-10  # 수치 안정성을 위한 작은 값
+# Strategy parameters
+OMEGA_Q_CONSERVATIVE = 0.2
+OMEGA_MIN_BINS = 5
+AST_FREQ_QUANTILE_CONSERVATIVE = 0.4
 
-# Mel Scale Parameters
-N_MELS = 128  # Mel 스펙트로그램 빈 수 - AST 모델과 호환
+# Classification thresholds
+CONFIDENCE_THRESHOLD = 0.8
+PURITY_THRESHOLD = 0.7
+RESIDUAL_CONFIDENCE_THRESHOLD = 0.7
 
-# Anchor Score Parameters
-SMOOTH_T      = 19           # 시간축 스무딩 커널 크기 (홉 단위)
-ALPHA_ATT     = 0.80         # 어텐션 가중치 지수 (낮을수록 어텐션 영향 감소)
-BETA_PUR      = 1.20         # 순도(purity) 가중치 지수 (높을수록 순도 중시)
-W_E           = 0.30         # 에너지와 엔트로피의 가중치 비율
-TOP_PCT_CORE_IN_ANCHOR  = 0.50  # 앵커 내 코어 영역 비율 (50%)
+# Processing limits
+MAX_PASSES = 3
+MIN_ERATIO = 0.001  # 0.01에서 0.001로 대폭 감소
 
-# Ω & Template Parameters (Adaptive)
-OMEGA_Q_CONSERVATIVE = 0.2   # 보수적 전략용
-OMEGA_Q_AGGRESSIVE   = 0.7   # 공격적 전략용
-OMEGA_DIL         = 2        # Ω 마스크 팽창 반복 횟수 (인접 주파수 포함)
-OMEGA_MIN_BINS    = 5        # 최소 선택할 주파수 빈 수 (너무 적은 선택 방지)
+# Audio amplification parameters
+MIN_ANCHOR_ENERGY = 0.001  # 앵커 에너지 최소 임계값
+AMPLIFICATION_FACTOR = 10.0  # 증폭 배수
+MAX_AMPLIFICATION = 100.0  # 최대 증폭 제한
 
-# AST Frequency Attention Parameters (Adaptive)
-AST_FREQ_QUANTILE_CONSERVATIVE = 0.4  # 보수적 전략용
-AST_FREQ_QUANTILE_AGGRESSIVE   = 0.2  # 공격적 전략용
-
-# Sound Type Classification
+# Sound classification mappings
 DANGER_IDS = {396, 397, 398, 399, 400, 426, 436}
 HELP_IDS = {23, 14, 354, 355, 356, 359}
 WARNING_IDS = {288, 364, 388, 389, 390, 439, 391, 392, 393, 395, 440, 441, 443, 456, 469, 470, 478, 479}
 
-# Presence Gate Parameters
-PRES_Q            = 0.20     # Presence gate quantile (상위 80% 에너지 구간에서 presence 판단)
-PRES_SMOOTH_T     = 9        # Presence gate 시간축 스무딩 커널 크기
-
-# Suppression Parameters (이전 패스 억제)
-USED_THRESHOLD        = 0.65  # 사용된 프레임 판단 임계값 (65% 이상 마스크된 프레임)
-USED_DILATE_MS        = 80    # 사용된 프레임 주변 확장 시간 (ms)
-ANCHOR_SUPPRESS_MS    = 200   # 이전 앵커 중심 억제 반경 (ms)
-ANCHOR_SUPPRESS_BASE  = 0.6   # 이전 앵커 억제 강도 (60% 억제)
-
-# Loop Control Parameters
-MAX_PASSES    = 3      # 최대 분리 패스 수 (3번까지 반복)
-MIN_ERATIO    = 0.01   # 최소 에너지 비율 (1% 미만이면 중단)
-
 # =========================
-# Utils
+# Utility Functions
 # =========================
 def norm01(x: torch.Tensor) -> torch.Tensor:
     return (x - x.min()) / (x.max() - x.min() + 1e-8)
 
-def ensure_odd(k: int) -> int:
-    return k + 1 if (k % 2 == 0) else k
-
 def smooth1d(x: torch.Tensor, k: int) -> torch.Tensor:
-    if k <= 1: return x
+    if k <= 1:
+        return x
     ker = torch.ones(k, device=x.device) / k
     return F.conv1d(x.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1)
 
-def to_np(x: torch.Tensor) -> np.ndarray:
-    return x.detach().cpu().numpy()
-
-def align_len_1d(x: torch.Tensor, T: int, device=None, mode="linear"):
-    if device is None: device = x.device
-    xv = x.to(device).view(1,1,-1).float()
-    if xv.size(-1) == T:
-        out = xv.view(-1)
+def align_len_1d(x: torch.Tensor, target_len: int, device: torch.device, mode: str = "linear") -> torch.Tensor:
+    """1D 텐서의 길이를 목표 길이에 맞춤"""
+    if x.shape[0] == target_len:
+        return x
+    
+    if mode == "linear":
+        return F.interpolate(x.view(1, 1, -1), size=target_len, mode="linear", align_corners=False).view(-1)
+    elif mode == "nearest":
+        return F.interpolate(x.view(1, 1, -1), size=target_len, mode="nearest").view(-1)
     else:
-        out = F.interpolate(xv, size=T, mode=mode, align_corners=False).view(-1)
-    return out.clamp(0,1)
-
-def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 0.0) -> torch.Tensor:
-    sig = torch.sigmoid(slope * (x - center))
-    return min_val + (1.0 - min_val) * sig
+        raise ValueError(f"Unknown mode: {mode}")
 
 def get_sound_type(class_id: int) -> str:
-    """클래스 ID를 기반으로 소리 타입 반환"""
     if class_id in DANGER_IDS:
         return "danger"
     elif class_id in HELP_IDS:
@@ -129,25 +110,10 @@ def get_sound_type(class_id: int) -> str:
     else:
         return "other"
 
-def calculate_decibel(audio: np.ndarray) -> Tuple[float, float, float]:
-    """오디오의 데시벨 계산 (min, max, 평균)"""
-    # RMS 계산
-    rms = np.sqrt(np.mean(audio**2))
-    if rms == 0:
-        return -np.inf, -np.inf, -np.inf
-    
-    # 데시벨 변환 (20 * log10(rms))
-    db = 20 * np.log10(rms + 1e-10)
-    
-    # min, max, 평균 계산
-    db_min = 20 * np.log10(np.min(np.abs(audio)) + 1e-10)
-    db_max = 20 * np.log10(np.max(np.abs(audio)) + 1e-10)
-    db_mean = db
-    
-    return db_min, db_max, db_mean
-
 def calculate_global_purity(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> float:
     """전체 오디오에 대한 순수도 계산"""
+    if w_bar is None or omega is None:
+        return 0.5  # 기본값
     g_pres = presence_from_energy(Xmel, omega)
     cos_t_raw = cos_similarity_over_omega(Xmel, w_bar, omega, g_pres)
     global_purity = cos_t_raw.mean().item()
@@ -168,198 +134,71 @@ def should_skip_separation(confidence: float, purity: float, class_id: int) -> b
     # 신뢰도와 순수도가 모두 임계값 이상이면 분리 건너뛰기
     return confidence >= confidence_threshold and purity >= purity_threshold
 
-@torch.no_grad()
-def classify_audio_segment(audio: np.ndarray, extractor, ast_model) -> Tuple[str, str, int, float]:
-    """오디오 세그먼트를 분류하여 클래스명, 타입, ID, 신뢰도 반환 (잔여물 분류용)"""
-    # 10초로 패딩
-    target_len = int(10.0 * SR)
-    if len(audio) < target_len:
-        audio_padded = np.zeros(target_len, dtype=np.float32)
-        audio_padded[:len(audio)] = audio
+def adaptive_strategy_selection(prev_energy_ratio: float, pass_idx: int) -> str:
+    """
+    이전 에너지 비율과 패스 인덱스에 따라 적응적 전략 선택
+    """
+    if pass_idx == 0:
+        return "conservative"  # 첫 번째 패스는 항상 보수적
+    
+    if prev_energy_ratio < 0.3:
+        return "aggressive"  # 이전 분리가 효과적이면 공격적
     else:
-        audio_padded = audio[:target_len]
-    
-    # AST 모델로 분류
-    feat = extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
-    outputs = ast_model(input_values=feat["input_values"])
-    
-    # Top-1 클래스 추출 및 신뢰도 계산
-    logits = outputs.logits
-    probabilities = torch.softmax(logits, dim=-1)
-    predicted_class_id = logits.argmax(dim=-1).item()
-    confidence = probabilities[0, predicted_class_id].item()
-    
-    class_name = ast_model.config.id2label[predicted_class_id]
-    sound_type = get_sound_type(predicted_class_id)
-    
-    return class_name, sound_type, predicted_class_id, confidence
+        return "conservative"  # 이전 분리가 비효과적이면 보수적
+
+def calculate_decibel(audio: np.ndarray) -> Tuple[float, float, float]:
+    rms = np.sqrt(np.mean(audio**2))
+    if rms == 0:
+        return -np.inf, -np.inf, -np.inf
+    db = 20 * np.log10(rms)
+    return db, db, db
+
 
 # =========================
-# Debug Visualization
+# Audio Processing Functions
 # =========================
-def debug_plot(pass_idx: int, Sc: torch.Tensor, a_raw: torch.Tensor, cos_t_raw: torch.Tensor, 
-               C_t: torch.Tensor, P: torch.Tensor, M_lin: torch.Tensor, full_map: torch.Tensor,
-               s: int, e: int, core_s_rel: int, core_e_rel: int, ast_freq_attn: torch.Tensor,
-               src_amp: np.ndarray, res: np.ndarray, png: str, title: str = "",
-               original_audio: np.ndarray = None, global_confidence: float = 0.0, 
-               global_purity: float = 0.0):
-    fig, axes = plt.subplots(3, 3, figsize=(20, 15))
-    # 제목에 전체 신뢰도와 순수도 추가
-    enhanced_title = f"{title}\nGlobal Confidence: {global_confidence:.3f} | Global Purity: {global_purity:.3f}"
-    fig.suptitle(enhanced_title, fontsize=16, fontweight='bold')
+def load_fixed_audio(file_path: str) -> np.ndarray:
+    """Load and fix audio to WIN_SEC length"""
+    wav, sr = torchaudio.load(file_path)
+    if sr != SR:
+        wav = torchaudio.functional.resample(wav, sr, SR)
     
-    # === 첫 번째 행: 파형 (Waveforms) ===
-    # 1. Original Audio Waveform
-    ax = axes[0, 0]
-    if original_audio is not None:
-        time_axis = np.linspace(0, len(original_audio) / SR, len(original_audio))
-        ax.plot(time_axis, original_audio, 'b-', alpha=0.7, linewidth=0.8)
-        ax.set_title('Original Audio Waveform')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude')
-        ax.set_ylim(-1, 1)  # Amplitude 범위 통일
-        ax.grid(True, alpha=0.3)
+    audio = wav[0].numpy()
+    
+    # Fix length to WIN_SEC
+    if len(audio) < L_FIXED:
+        audio = np.pad(audio, (0, L_FIXED - len(audio)), mode='constant')
     else:
-        ax.text(0.5, 0.5, 'No original audio', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title('Original Audio Waveform')
-        ax.set_ylim(-1, 1)
+        audio = audio[:L_FIXED]
     
-    # 2. Separated Source Waveform
-    ax = axes[0, 1]
-    time_axis = np.linspace(0, len(src_amp) / SR, len(src_amp))
-    ax.plot(time_axis, src_amp, 'g-', alpha=0.7, linewidth=0.8)
-    ax.set_title('Separated Source Waveform')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Amplitude')
-    ax.set_ylim(-1, 1)  # Amplitude 범위 통일
-    ax.grid(True, alpha=0.3)
-    
-    # 3. Residual Audio Waveform
-    ax = axes[0, 2]
-    time_axis = np.linspace(0, len(res) / SR, len(res))
-    ax.plot(time_axis, res, 'r-', alpha=0.7, linewidth=0.8)
-    ax.set_title('Residual Audio Waveform')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Amplitude')
-    ax.set_ylim(-1, 1)  # Amplitude 범위 통일
-    ax.grid(True, alpha=0.3)
-    
-    # === 두 번째 행: Mel 스펙트로그램 및 분석 ===
-    # 4. Anchor Score
-    ax = axes[1, 0]
-    T = Sc.numel()
-    t_axis = np.arange(T) * HOP / SR
-    ax.plot(t_axis, to_np(Sc), 'b-', linewidth=1.5, label='Anchor Score')
-    ax.axvspan(s*HOP/SR, e*HOP/SR, alpha=0.3, color='red', label='Anchor Region')
-    ax.axvspan((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR, alpha=0.5, color='orange', label='Core Region')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Score')
-    ax.set_title('Anchor Selection')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 5. Amplitude & Cosine Similarity
-    ax = axes[1, 1]
-    t_axis = np.arange(a_raw.numel()) * HOP / SR
-    ax.plot(t_axis, to_np(a_raw), 'g-', linewidth=1.5, label='Amplitude')
-    ax2 = ax.twinx()
-    ax2.plot(t_axis, to_np(cos_t_raw), 'r-', linewidth=1.5, label='Cosine Similarity')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Amplitude', color='g')
-    ax2.set_ylabel('Cosine Similarity', color='r')
-    ax.set_title('Amplitude & Cosine Similarity')
-    ax.legend(loc='upper left')
-    ax2.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    
-    # 6. AST Frequency Attention
-    ax = axes[1, 2]
-    ax.plot(to_np(ast_freq_attn), 'purple', linewidth=2)
-    ax.set_title('AST Frequency Attention')
-    ax.set_xlabel('Mel bins')
-    ax.set_ylabel('Attention weight')
-    ax.grid(True, alpha=0.3)
-    
-    # === 세 번째 행: Linear 스펙트로그램 ===
-    # 7. Power Spectrogram
-    ax = axes[2, 0]
-    fbins, T = P.shape
-    f_axis = np.arange(fbins) * SR / (2 * fbins)
-    t_axis = np.arange(T) * HOP / SR
-    im = ax.imshow(to_np(torch.log10(P + 1e-10)), aspect='auto', origin='lower', 
-                   extent=[t_axis[0], t_axis[-1], f_axis[0], f_axis[-1]], cmap='viridis')
-    ax.axvspan(s*HOP/SR, e*HOP/SR, alpha=0.3, color='red')
-    ax.axvspan((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR, alpha=0.5, color='orange')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Frequency (Hz)')
-    ax.set_title('Power Spectrogram (log10)')
-    plt.colorbar(im, ax=ax, label='log10(Power)')
-    
-    # 8. Generated Mask
-    ax = axes[2, 1]
-    im = ax.imshow(to_np(M_lin), aspect='auto', origin='lower',
-                   extent=[t_axis[0], t_axis[-1], f_axis[0], f_axis[-1]], cmap='hot')
-    ax.axvspan(s*HOP/SR, e*HOP/SR, alpha=0.3, color='cyan')
-    ax.axvspan((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR, alpha=0.5, color='yellow')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Frequency (Hz)')
-    ax.set_title('Generated Mask')
-    plt.colorbar(im, ax=ax, label='Mask Value')
-    
-    # 9. Masked Spectrogram
-    ax = axes[2, 2]
-    masked_spec = P * M_lin
-    im = ax.imshow(to_np(torch.log10(masked_spec + 1e-10)), aspect='auto', origin='lower',
-                   extent=[t_axis[0], t_axis[-1], f_axis[0], f_axis[-1]], cmap='viridis')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Frequency (Hz)')
-    ax.set_title('Masked Spectrogram (log10)')
-    plt.colorbar(im, ax=ax, label='log10(Power)')
-    
-    plt.tight_layout()
-    plt.savefig(png, dpi=150, bbox_inches='tight')
-    plt.close()
-
-# =========================
-# IO & Spectra
-# =========================
-def load_fixed_audio(path: str) -> np.ndarray:
-    wav, sro = torchaudio.load(path)
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)
-    if sro != SR:
-        wav = torchaudio.functional.resample(wav, sro, SR)
-    wav = wav.squeeze().numpy().astype(np.float32)
-    if len(wav) >= L_FIXED:
-        return wav[:L_FIXED]
-    out = np.zeros(L_FIXED, dtype=np.float32)
-    out[:len(wav)] = wav
-    return out
+    return audio.astype(np.float32)
 
 @torch.no_grad()
-def stft_all(audio: np.ndarray, mel_fb_m2f: torch.Tensor):
+def stft_all(audio: np.ndarray, mel_fb_m2f: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Perform STFT analysis and mel conversion"""
     wav = torch.from_numpy(audio)
     st = torch.stft(wav, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN,
-                    window=WINDOW, return_complex=True, center=True)
+                   window=WINDOW, return_complex=True, center=True)
+    
     mag = st.abs()
-    P   = (mag * mag).clamp_min(EPS)
+    P = (mag * mag).clamp_min(EPS)
     phase = torch.angle(st)
-
+    
+    # Ensure correct dimensions for mel filterbank
     if mel_fb_m2f.shape[0] != N_MELS:
         mel_fb_m2f = mel_fb_m2f.T.contiguous()
-    assert mel_fb_m2f.shape[0] == N_MELS and mel_fb_m2f.shape[1] == P.shape[0]
+    
     mel_fb_m2f = mel_fb_m2f.to(P.dtype).to(P.device)
     mel_pow = (mel_fb_m2f @ P).clamp_min(EPS)
+    
     return st, mag, P, phase, mel_pow
 
-# =========================
-# AST Attention (Time & Frequency)
-# =========================
 @torch.no_grad()
-def ast_attention_freq_time(audio: np.ndarray, extractor, ast_model, T_out: int, F_out: int) -> Tuple[torch.Tensor, torch.Tensor, str, str, int, float]:
+def ast_attention_freq_time(audio: np.ndarray, extractor, ast_model, T_out: int, F_out: int, mel_fb_m2f: torch.Tensor = None, anchor_region: Tuple[int, int] = None) -> Tuple[torch.Tensor, torch.Tensor, str, str, int, float, List[Tuple[str, float, int]]]:
     """
     AST 어텐션에서 시간과 주파수 정보를 모두 추출하고 분류 결과도 함께 반환
-    Returns: (time_attention, freq_attention, class_name, sound_type, class_id, confidence)
+    anchor_region이 제공되면 해당 영역만 남기고 나머지는 0으로 만들어서 더 정확한 분류 수행
+    Returns: (time_attention, freq_attention, class_name, sound_type, class_id, confidence, top5_classes)
     """
     # 10초로 패딩
     target_len = int(10.0 * SR)
@@ -369,7 +208,28 @@ def ast_attention_freq_time(audio: np.ndarray, extractor, ast_model, T_out: int,
     else:
         audio_padded = audio[:target_len]
     
-    feat = extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
+    # 앵커 영역이 제공된 경우 해당 영역만 남기고 나머지는 0으로 설정
+    if anchor_region is not None:
+        anchor_start, anchor_end = anchor_region
+        # STFT 프레임을 오디오 샘플로 변환
+        frame_to_sample = HOP  # STFT hop length
+        audio_start = anchor_start * frame_to_sample
+        audio_end = anchor_end * frame_to_sample
+        
+        # 오디오 길이 내에서 클리핑
+        audio_start = max(0, min(audio_start, len(audio_padded)))
+        audio_end = max(0, min(audio_end, len(audio_padded)))
+        
+        # 앵커 영역만 남기고 나머지는 0으로 설정
+        audio_anchored = np.zeros_like(audio_padded)
+        audio_anchored[audio_start:audio_end] = audio_padded[audio_start:audio_end]
+        
+        print(f"  🎯 Using anchor-focused classification: frames {anchor_start}-{anchor_end} (samples {audio_start}-{audio_end})")
+        audio_for_classification = audio_anchored
+    else:
+        audio_for_classification = audio_padded
+    
+    feat = extractor(audio_for_classification, sampling_rate=SR, return_tensors="pt")
     out = ast_model(input_values=feat["input_values"], output_attentions=True, return_dict=True)
     attns = out.attentions
     
@@ -382,8 +242,17 @@ def ast_attention_freq_time(audio: np.ndarray, extractor, ast_model, T_out: int,
     class_name = ast_model.config.id2label[predicted_class_id]
     sound_type = get_sound_type(predicted_class_id)
     
+    # Top 5 클래스 추출
+    top5_probs, top5_indices = torch.topk(probabilities[0], 5)
+    top5_classes = []
+    for i in range(5):
+        class_id = top5_indices[i].item()
+        class_name_top5 = ast_model.config.id2label[class_id]
+        prob = top5_probs[i].item()
+        top5_classes.append((class_name_top5, prob, class_id))
+    
     if not attns or len(attns) == 0:
-        return torch.ones(T_out) * 0.5, torch.ones(F_out) * 0.5, class_name, sound_type, predicted_class_id, confidence
+        return torch.ones(T_out) * 0.5, torch.ones(F_out) * 0.5, class_name, sound_type, predicted_class_id, confidence, top5_classes
     
     # 마지막 레이어의 어텐션 사용
     A = attns[-1]  # [batch, heads, seq, seq]
@@ -405,25 +274,87 @@ def ast_attention_freq_time(audio: np.ndarray, extractor, ast_model, T_out: int,
     # 2D 맵으로 재구성
     full_map = cls_to_patches.reshape(Fp, Tp)  # [12, 101]
     
-    # 시간 어텐션 (주파수 차원으로 평균)
-    time_attn = full_map.mean(dim=0)  # [101]
+    # 실제 오디오 길이에 해당하는 부분만 추출 (정확한 시간 매핑)
+    original_audio_duration = len(audio) / SR  # 실제 오디오 길이 (초)
+    target_duration = target_len / SR  # 패딩된 오디오 길이 (초)
+    original_audio_ratio = original_audio_duration / target_duration  # 정확한 비율
+    
+    # AST 패치 구조: 101개 패치가 10초를 커버
+    time_patches_to_use = int(Tp * original_audio_ratio)  # 사용할 시간 패치 수
+    
+    print(f"  🔍 Audio duration: {original_audio_duration:.3f}s, Target: {target_duration:.3f}s, Ratio: {original_audio_ratio:.3f}")
+    print(f"  🔍 Using {time_patches_to_use}/{Tp} time patches for {original_audio_duration:.3f}s audio")
+    
+    # 실제 오디오에 해당하는 어텐션 맵만 추출
+    full_map_cropped = full_map[:, :time_patches_to_use]  # [12, time_patches_to_use]
+    
+    # 시간 어텐션 (주파수 차원으로 평균) - 크롭된 맵 사용
+    time_attn = full_map_cropped.mean(dim=0)  # [time_patches_to_use]
     time_attn_interp = F.interpolate(time_attn.view(1,1,-1), size=T_out, mode="linear", align_corners=False).view(-1)
     time_attn_smooth = smooth1d(time_attn_interp, SMOOTH_T)
     time_attn_norm = norm01(time_attn_smooth)
     
-    # 주파수 어텐션 (시간 차원으로 평균)
-    freq_attn = full_map.mean(dim=1)  # [12]
-    freq_attn_interp = F.interpolate(freq_attn.view(1,1,-1), size=F_out, mode="linear", align_corners=False).view(-1)
-    freq_attn_norm = norm01(freq_attn_interp)
+    # 주파수 어텐션 (시간 차원으로 평균) - 크롭된 맵 사용
+    freq_attn_mel = full_map_cropped.mean(dim=1)  # [12] - Mel 스케일
     
-    return time_attn_norm, freq_attn_norm, class_name, sound_type, predicted_class_id, confidence
+    # Mel → Linear 변환 (mel_fb_m2f 사용)
+    if mel_fb_m2f is not None and mel_fb_m2f.shape[0] == freq_attn_mel.shape[0]:
+        print(f"  🔍 Debug - Converting Mel attention {freq_attn_mel.shape} to Linear using mel_fb_m2f {mel_fb_m2f.shape}")
+        freq_attn_linear = torch.matmul(mel_fb_m2f, freq_attn_mel)  # [F_out]
+        print(f"  🔍 Debug - Converted to Linear attention: {freq_attn_linear.shape}")
+        freq_attn_norm = norm01(freq_attn_linear)
+    else:
+        # Fallback: 단순 보간 (차원이 맞지 않거나 mel_fb_m2f가 없는 경우)
+        if mel_fb_m2f is not None:
+            print(f"  ⚠️ Dimension mismatch: AST Mel bins {freq_attn_mel.shape[0]} vs mel_fb_m2f {mel_fb_m2f.shape[0]}, using interpolation")
+        else:
+            print(f"  ⚠️ No mel_fb_m2f provided, using simple interpolation")
+        freq_attn_interp = F.interpolate(freq_attn_mel.view(1,1,-1), size=F_out, mode="linear", align_corners=False).view(-1)
+        freq_attn_norm = norm01(freq_attn_interp)
+    
+    return time_attn_norm, freq_attn_norm, class_name, sound_type, predicted_class_id, confidence, top5_classes, full_map_cropped
+
+@torch.no_grad()
+def classify_audio_segment(audio: np.ndarray, extractor, ast_model) -> Tuple[str, str, int, float, List[Tuple[str, float, int]]]:
+    """Residual audio classification with confidence threshold"""
+    # 10초로 패딩
+    target_len = int(10.0 * SR)
+    if len(audio) < target_len:
+        audio_padded = np.zeros(target_len, dtype=np.float32)
+        audio_padded[:len(audio)] = audio
+    else:
+        audio_padded = audio[:target_len]
+    
+    feat = extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
+    out = ast_model(input_values=feat["input_values"], return_dict=True)
+    
+    logits = out.logits
+    probabilities = torch.softmax(logits, dim=-1)
+    predicted_class_id = logits.argmax(dim=-1).item()
+    confidence = probabilities[0, predicted_class_id].item()
+    
+    class_name = ast_model.config.id2label[predicted_class_id]
+    sound_type = get_sound_type(predicted_class_id)
+    
+    # Top 5 클래스 추출
+    top5_probs, top5_indices = torch.topk(probabilities[0], 5)
+    top5_classes = []
+    for i in range(5):
+        class_id = top5_indices[i].item()
+        class_name_top5 = ast_model.config.id2label[class_id]
+        prob = top5_probs[i].item()
+        top5_classes.append((class_name_top5, prob, class_id))
+    
+    return class_name, sound_type, predicted_class_id, confidence, top5_classes
 
 # =========================
-# Attention & Purity
+# Core Separation Logic
 # =========================
-def purity_from_P(P: torch.Tensor) -> torch.Tensor:
+def calculate_purity(P: torch.Tensor) -> torch.Tensor:
+    """Calculate spectral purity"""
     fbins, T = P.shape
-    e = P.sum(dim=0); e_n = e / (e.max() + EPS)
+    e = P.sum(dim=0)
+    e_n = e / (e.max() + EPS)
     p = P / (P.sum(dim=0, keepdim=True) + EPS)
     H = -(p * (p + EPS).log()).sum(dim=0)
     Hn = H / np.log(max(2, fbins))
@@ -433,41 +364,108 @@ def purity_from_P(P: torch.Tensor) -> torch.Tensor:
 def anchor_score(A_t: torch.Tensor, Pur: torch.Tensor) -> torch.Tensor:
     return norm01(smooth1d((A_t.clamp(0,1)**ALPHA_ATT) * (Pur.clamp(0,1)**BETA_PUR), SMOOTH_T))
 
+def anchor_score_with_exclusion(A_t: torch.Tensor, Pur: torch.Tensor, previous_anchors: List[Tuple[int, int]], 
+                               attention_matrix: torch.Tensor = None) -> torch.Tensor:
+    """이전 앵커 영역만 제외한 앵커 스코어 계산 (어텐션 상위 30% 제외 로직 제거)"""
+    Sc = norm01(smooth1d((A_t.clamp(0,1)**ALPHA_ATT) * (Pur.clamp(0,1)**BETA_PUR), SMOOTH_T))
+    
+    # 이전 앵커 영역들에만 페널티 적용
+    for prev_s, prev_e in previous_anchors:
+        # 이전 앵커 영역에 작은 페널티 적용 (완전히 0으로 만들지 않음)
+        penalty_factor = 0.1  # 10%로 감소
+        Sc[prev_s:prev_e] = Sc[prev_s:prev_e] * penalty_factor
+        print(f"    🚫 Applied penalty to previous anchor region [{prev_s}:{prev_e}] (factor: {penalty_factor})")
+    
+    return Sc
+
 def pick_anchor_region(score: torch.Tensor, La: int, core_pct: float, 
-                      previous_anchors: List[Tuple[int, int]] = None) -> Tuple[int, int, int, int]:
+                      previous_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor,torch.Tensor]] = None,
+                      attention_matrix: torch.Tensor = None, purity_scores: torch.Tensor = None) -> Tuple[int, int, int, int]:
     """
-    Finds the highest score peak, creates an anchor around it, and then finds
-    the core region within that anchor, also centered on the peak.
-    Avoids previous anchor regions to prevent re-selection.
-    Returns: (anchor_start, anchor_end, core_start_relative, core_end_relative)
+    시간 어텐션 상위 30% 중에서 순수도 점수가 가장 높은 부분을 앵커로 선택합니다.
     """
     T = score.numel()
 
-    # Create mask to avoid previous anchor regions
-    avoid_mask = torch.ones(T, dtype=torch.bool, device=score.device)
+    # 이전 패스에서 분리된 시간대를 앵커 선택에서 완전히 제외 (강화)
     if previous_anchors:
-        for prev_s, prev_e in previous_anchors:
-            # 이전 앵커 구간과 그 주변을 피하도록 마스크 생성
-            # 앵커 길이의 1.5배만큼 확장하여 피하기
-            buffer = int(La * 1.5)
+        # 이전 패스에서 분리된 시간대들을 완전히 제외
+        avoid_mask = torch.ones(T, dtype=torch.bool, device=score.device)
+        for prev_s, prev_e, prev_mask, prev_weight, prev_anchor_score in previous_anchors:
+            # 이전 앵커 영역 전체를 제외 (20% 버퍼)
+            buffer = int(La * 0.2)  # 앵커 길이의 20% 버퍼 추가
             avoid_start = max(0, prev_s - buffer)
             avoid_end = min(T, prev_e + buffer)
             avoid_mask[avoid_start:avoid_end] = False
-            print(f"    🚫 Avoiding previous anchor region: {prev_s}-{prev_e} (extended: {avoid_start}-{avoid_end})")
-    
-    # 1. Find the index of the highest score that avoids previous anchors
-    if previous_anchors and avoid_mask.sum() > 0:
-        candidate_score = score.clone()
-        candidate_score[~avoid_mask] = -float('inf')
-        if candidate_score.max() > -float('inf'):
-            peak_idx = int(torch.argmax(candidate_score).item())
-            print(f"    ✅ Selected new anchor region avoiding {len(previous_anchors)} previous anchors")
-        else:
-            # 모든 영역이 피해야 할 영역이면, 피해야 할 영역을 무시하고 최고점 선택
-            print(f"    ⚠️ All regions are avoided, selecting best available region")
-            peak_idx = int(torch.argmax(score).item())
+            
+            print(f"    🚫 Excluding previous anchor region: {prev_s}-{prev_e} (extended: {avoid_start}-{avoid_end})")
     else:
-        peak_idx = int(torch.argmax(score).item())
+        avoid_mask = torch.ones(T, dtype=torch.bool, device=score.device)
+
+    # 시간 어텐션 상위 30% 중에서 순수도 최고점 선택
+    if attention_matrix is not None and purity_scores is not None:
+        print(f"    🎯 Using attention-guided purity-based anchor selection")
+        
+        # AST 어텐션 매트릭스에서 시간별 평균 어텐션 계산
+        time_attention = attention_matrix.mean(dim=0)  # [time_patches] - 시간별 평균 어텐션
+        
+        # 상위 30% 임계값 계산
+        if time_attention.max() > time_attention.min():
+            top30_threshold = torch.quantile(time_attention, 0.7)  # 상위 30%
+            top30_mask = time_attention >= top30_threshold
+        else:
+            # 모든 값이 동일할 때는 상위 30% 패치를 무작위로 선택
+            num_patches = len(time_attention)
+            top30_count = int(num_patches * 0.3)
+            _, top_indices = torch.topk(time_attention, top30_count)
+            top30_mask = torch.zeros_like(time_attention, dtype=torch.bool)
+            top30_mask[top_indices] = True
+            top30_threshold = time_attention[top_indices[0]].item()
+        
+        print(f"    📊 Top 30% attention threshold: {top30_threshold:.3f}")
+        
+        # 상위 30% 패치들을 STFT 시간 프레임으로 변환
+        total_time_frames = len(score)
+        time_patches = len(time_attention)  # 크롭된 맵의 시간 패치 수
+        
+        # 어텐션 상위 30%에 해당하는 STFT 프레임들 찾기
+        top30_frames = torch.zeros(T, dtype=torch.bool, device=score.device)
+        for patch_idx in range(time_patches):
+            if top30_mask[patch_idx]:
+                # 패치를 STFT 프레임으로 변환
+                frame_start = int((patch_idx / time_patches) * total_time_frames)
+                frame_end = int(((patch_idx + 1) / time_patches) * total_time_frames)
+                top30_frames[frame_start:frame_end] = True
+        
+        # 어텐션 상위 30% 프레임 중에서 이전 앵커 영역을 제외
+        candidate_frames = top30_frames & avoid_mask
+        
+        if candidate_frames.sum() > 0:
+            # 어텐션 상위 30% 중에서 순수도가 가장 높은 프레임 선택
+            candidate_purity = purity_scores.clone()
+            candidate_purity[~candidate_frames] = -float('inf')
+            peak_idx = int(torch.argmax(candidate_purity).item())
+            
+            print(f"    ✅ Selected anchor from top 30% attention frames with highest purity: {purity_scores[peak_idx]:.3f}")
+        else:
+            # 어텐션 상위 30%에 유효한 프레임이 없으면 전체에서 순수도 최고점 선택
+            candidate_purity = purity_scores.clone()
+            candidate_purity[~avoid_mask] = -float('inf')
+            if candidate_purity.max() > -float('inf'):
+                peak_idx = int(torch.argmax(candidate_purity).item())
+                print(f"    ⚠️ No valid frames in top 30% attention, selected highest purity from available: {purity_scores[peak_idx]:.3f}")
+            else:
+                # 모든 영역이 제외되었다면 원래 스코어에서 선택
+                peak_idx = int(torch.argmax(score).item())
+                print(f"    ⚠️ All regions excluded, selecting from original score")
+    else:
+        # 어텐션 정보가 없으면 기존 방식 사용
+        print(f"    🎯 Using pure anchor score based selection (no attention/purity combination)")
+        combined_score = score.clone()
+        combined_score[~avoid_mask] = -float('inf')
+        if combined_score.max() > -float('inf'):
+            peak_idx = int(torch.argmax(combined_score).item())
+        else:
+            peak_idx = int(torch.argmax(score).item())
 
     # 2. Calculate the anchor window centered on the peak.
     anchor_s = max(0, min(peak_idx - (La // 2), T - La))
@@ -491,94 +489,89 @@ def pick_anchor_region(score: torch.Tensor, La: int, core_pct: float,
     while core_e_rel < La - 1 and local_score[core_e_rel + 1] >= threshold:
         core_e_rel += 1
     
-    # End index is exclusive, so add 1
-    core_e_rel += 1
-
+    # 7. Validate that the selected anchor has meaningful energy
+    anchor_energy = local_score.mean().item()
+    if anchor_energy < 0.01:  # Very low energy threshold
+        print(f"    ⚠️ Selected anchor has very low energy ({anchor_energy:.6f}), may not be effective")
+    elif anchor_energy < 0.05:  # Low energy threshold
+        print(f"    ⚠️ Selected anchor has low energy ({anchor_energy:.6f}), separation may be weak")
+    else:
+        print(f"    ✅ Selected anchor has good energy ({anchor_energy:.6f})")
+    
     return anchor_s, anchor_e, core_s_rel, core_e_rel
 
-# =========================
-# Ω & Template Generation (Adaptive Strategy)
-# =========================
-def omega_support_with_ast_freq(Ablk: torch.Tensor, ast_freq_attn: torch.Tensor, strategy: str = "conservative") -> torch.Tensor:
-    """
-    적응적 전략에 따른 AST 주파수 어텐션을 고려한 omega 지원 계산
-    """
-    # 전략에 따른 파라미터 선택
-    if strategy == "conservative":
-        omega_q = OMEGA_Q_CONSERVATIVE
-        ast_freq_quantile = AST_FREQ_QUANTILE_CONSERVATIVE
-    else:  # aggressive
-        omega_q = OMEGA_Q_AGGRESSIVE
-        ast_freq_quantile = AST_FREQ_QUANTILE_AGGRESSIVE
+def create_frequency_support(Ablk: torch.Tensor, ast_freq_attn: torch.Tensor) -> torch.Tensor:
+    """Create frequency support mask from anchor block and AST attention"""
+    fbins = Ablk.shape[0]
     
-    # 기존 방식으로 계산된 마스크
-    med = Ablk.median(dim=1).values
-    th = torch.quantile(med, omega_q)
-    mask_energy = (med >= th).float()
+    # Calculate energy per frequency bin
+    energy_per_freq = Ablk.sum(dim=1)
+    energy_threshold = torch.quantile(energy_per_freq, OMEGA_Q_CONSERVATIVE)
     
-    # AST 주파수 어텐션에서 상위 주파수들 선택
-    ast_freq_th = torch.quantile(ast_freq_attn, ast_freq_quantile)
-    mask_ast_freq = (ast_freq_attn >= ast_freq_th).float()
+    # Create smooth mask using sigmoid instead of binary
+    # 시그모이드 함수로 부드러운 전환 생성
+    sigmoid_slope = 10.0  # 시그모이드 기울기 (가파를수록 이진에 가까움)
+    energy_sigmoid = torch.sigmoid(sigmoid_slope * (energy_per_freq - energy_threshold))
     
-    # 두 마스크를 결합 (OR 연산)
-    mask = torch.maximum(mask_energy, mask_ast_freq)
+    # Ensure minimum number of active bins (부드러운 버전)
+    if energy_sigmoid.sum() < OMEGA_MIN_BINS:
+        _, top_indices = torch.topk(energy_per_freq, OMEGA_MIN_BINS)
+        # 상위 빈들에 더 높은 가중치 부여
+        omega = torch.zeros_like(energy_sigmoid)
+        omega[top_indices] = 1.0
+        # 나머지는 시그모이드 값 유지
+        omega = torch.maximum(omega, energy_sigmoid * 0.3)  # 최소 30% 가중치
+    else:
+        omega = energy_sigmoid
     
-    # 기존 팽창 연산
-    for _ in range(OMEGA_DIL):
-        mask = torch.maximum(mask, torch.roll(mask, 1))
-        mask = torch.maximum(mask, torch.roll(mask, -1))
+    # Apply AST frequency attention weighting (부드러운 버전)
+    ast_threshold = torch.quantile(ast_freq_attn, AST_FREQ_QUANTILE_CONSERVATIVE)
+    ast_sigmoid = torch.sigmoid(sigmoid_slope * (ast_freq_attn - ast_threshold))
     
-    # 최소 빈 수 보장
-    if int(mask.sum().item()) < OMEGA_MIN_BINS:
-        order = torch.argsort(med, descending=True)
-        need = OMEGA_MIN_BINS - int(mask.sum().item())
-        take = order[:need]
-        mask[take] = 1.0
+    # Combine energy and attention masks (부드러운 곱셈)
+    omega = omega * ast_sigmoid
     
-    return mask
+    return omega
 
-def template_from_anchor_block(Ablk: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-    om = omega.view(-1,1)
-    w  = (Ablk * om).mean(dim=1) * omega
-    w  = w / (w.sum() + EPS)
-    w_sm = F.avg_pool1d(w.view(1,1,-1), kernel_size=3, stride=1, padding=1).view(-1)
-    w   = (w_sm * omega); w = w / (w.sum() + EPS)
+def create_template(Ablk: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
+    """Create spectral template from anchor block using frequency support (separator.py style)"""
+    # separator.py 방식: 시간 평균 + 스무딩 + 주파수 가중치 재적용
+    om = omega.view(-1, 1)
+    w = (Ablk * om).mean(dim=1) * omega  # 1단계: 시간 평균 후 주파수 가중치 재적용
+    w = w / (w.sum() + EPS)
+    w_sm = F.avg_pool1d(w.view(1, 1, -1), kernel_size=3, stride=1, padding=1).view(-1)  # 2단계: 3점 평균 필터
+    w = (w_sm * omega)  # 3단계: 스무딩 후 다시 주파수 가중치 적용
+    w = w / (w.sum() + EPS)  # 최종 정규화
+    
     return w
 
-# =========================
-# Presence gate & cosΩ
-# =========================
 def presence_from_energy(Xmel: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-    om = omega.view(-1,1)
+    """Calculate presence from energy using frequency support (smooth version)"""
+    om = omega.view(-1, 1)
     e_omega = (Xmel * om).sum(dim=0)
-    e_omega = smooth1d(e_omega, PRES_SMOOTH_T)
-    thr = torch.quantile(e_omega, PRES_Q)
-    thr = torch.clamp(thr, min=1e-10)
-    return (e_omega > thr).float()
+    e_omega = smooth1d(e_omega, 9)
+    thr = torch.quantile(e_omega, 0.20)
+    
+    # 시그모이드 함수로 부드러운 presence 계산
+    sigmoid_slope = 5.0  # presence용 시그모이드 기울기
+    g_pres = torch.sigmoid(sigmoid_slope * (e_omega - torch.clamp(thr, min=1e-10)))
+    
+    return g_pres
 
-def amplitude_raw(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-    om = omega.view(-1,1)
-    Xo = Xmel * om
-    denom = (w_bar*w_bar).sum() + EPS
-    a_raw = (w_bar.view(1,-1) @ Xo).view(-1) / denom
-    return a_raw.clamp_min(0.0)
-
-def cos_similarity_over_omega(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, g_pres: torch.Tensor):
-    om = omega.view(-1,1)
-    Xo = Xmel * om
-    wn = (w_bar * omega); wn = wn / (wn.norm(p=2) + 1e-8)
+def cos_similarity_over_omega(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, g_pres: torch.Tensor) -> torch.Tensor:
+    """Calculate cosine similarity over frequency support"""
+    Xo = Xmel * omega.view(-1, 1)
+    wn = (w_bar * omega) / ((w_bar * omega).norm(p=2) + 1e-8)
     Xn = Xo / (Xo.norm(p=2, dim=0, keepdim=True) + 1e-8)
-    cos_raw = (wn.view(-1,1) * Xn).sum(dim=0).clamp(0,1)
-    return cos_raw * g_pres
+    cos_t_raw = (wn.view(-1,1) * Xn).sum(dim=0).clamp(0,1) * g_pres
+    return cos_t_raw
 
-# =========================
-# Adaptive Masking Strategy
-# =========================
 def adaptive_masking_strategy(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, 
                            ast_freq_attn: torch.Tensor, P: torch.Tensor, mel_fb_m2f: torch.Tensor,
-                           s: int, e: int, strategy: str = "conservative") -> torch.Tensor:
+                           s: int, e: int, Ablk: torch.Tensor, confidence: float, strategy: str = "conservative") -> torch.Tensor:
     """
     적응적 마스킹 전략: 보수적/공격적 모드에 따른 동적 마스크 생성
+    유사도 0.6 미만인 부분은 템플릿과 완벽히 일치하는 부분만 남기고 에너지 1%만 남김
     """
     fbins, T = P.shape
     
@@ -586,93 +579,180 @@ def adaptive_masking_strategy(Xmel: torch.Tensor, w_bar: torch.Tensor, omega: to
     g_pres = presence_from_energy(Xmel, omega)
     cos_t_raw = cos_similarity_over_omega(Xmel, w_bar, omega, g_pres)
     
-    # 2. 전략에 따른 코사인 유사도 처리
-    if strategy == "conservative":
-        # 보수적 방식: 제곱으로 약화
-        cos_processed = cos_t_raw ** 2
-    else:  # aggressive
-        # 공격적 방식: 시그모이드 적용
-        cos_processed = torch.sigmoid(MASK_SIGMOID_SLOPE * (cos_t_raw - MASK_SIGMOID_CENTER))
+    # 2. 동적 유사도 임계값 설정 (AST 모델 신뢰도 기반)
+    # AST 모델이 처음에 판단한 top1 소리의 신뢰도를 임계값으로 사용
+    similarity_threshold = confidence  # 신뢰도를 임계값으로 사용
+    low_similarity_mask = (cos_t_raw < similarity_threshold).float()
+    high_similarity_mask = (cos_t_raw >= similarity_threshold).float()
     
-    # 3. 주파수 가중치 계산
+    print(f"    🎯 Dynamic similarity threshold: {similarity_threshold:.3f} (based on AST confidence)")
+    
+    # 3. 신뢰도 기반 분리 강도 조절 (올바른 접근)
+    # 신뢰도가 낮으면 분리 강도를 낮추되, 최소한의 분리는 보장
+    if confidence >= 0.8:
+        confidence_factor = 1.0  # 높은 신뢰도: 완전 분리
+    elif confidence >= 0.6:
+        confidence_factor = 0.7  # 중간 신뢰도: 70% 분리
+    else:
+        confidence_factor = 0.4  # 낮은 신뢰도: 40% 분리 (최소 분리 보장)
+    
+    # 코사인 유사도와 신뢰도 비교 기반 분리 강도 결정
+    # 코사인 유사도 > 신뢰도: 정상 분리
+    # 코사인 유사도 < 신뢰도: 최소 분리 (0.1)
+    cos_processed = torch.where(
+        cos_t_raw > confidence,  # 코사인 유사도 > 신뢰도
+        cos_t_raw,              # 정상 분리: 코사인 유사도 그대로 사용
+        0.1                     # 최소 분리: 0.1로 고정 (0.01에서 0.1로 증가)
+    )
+    
+    print(f"    🎯 Conditional separation: {torch.sum(cos_t_raw > confidence).item()}/{len(cos_t_raw)} frames use normal separation")
+    
+    # 4. 주파수 가중치 계산
     # Linear 도메인에서 직접 계산
-    omega_lin = ((mel_fb_m2f.T @ omega).clamp_min(0.0) > 1e-12).float()
+    if mel_fb_m2f.shape[0] == 128 and mel_fb_m2f.shape[1] == 201:
+        # mel_fb_m2f가 [128, 201] 형태인 경우
+        omega_lin = ((mel_fb_m2f.T @ omega).clamp_min(0.0) > 1e-12).float()
+    elif mel_fb_m2f.shape[0] == 201 and mel_fb_m2f.shape[1] == 128:
+        # mel_fb_m2f가 [201, 128] 형태인 경우
+        omega_lin = ((mel_fb_m2f @ omega).clamp_min(0.0) > 1e-12).float()
+    else:
+        # 차원이 맞지 않는 경우 기본값 사용
+        print(f"    ⚠️ mel_fb_m2f shape mismatch for omega: {mel_fb_m2f.shape}, using default mask")
+        omega_lin = torch.ones(201, device=omega.device)  # N_FFT//2 + 1 = 201
     
-    # 앵커 영역의 상위 20% 진폭 주파수 선택
+    # 앵커 영역의 상위 20% 진폭 주파수 선택 (부드러운 버전)
     anchor_spec = P[:, s:e]
     anchor_max_amp = anchor_spec.max(dim=1).values
     amp_threshold = torch.quantile(anchor_max_amp, 0.8)
-    high_amp_mask_lin = (anchor_max_amp >= amp_threshold).float()
+    # 시그모이드 함수로 부드러운 진폭 마스크 생성
+    sigmoid_slope = 6.0  # 진폭용 시그모이드 기울기
+    high_amp_mask_lin = torch.sigmoid(sigmoid_slope * (anchor_max_amp - amp_threshold))
     
-    # AST 주파수 어텐션을 Linear 도메인으로 변환
+    # AST 주파수 어텐션을 Linear 도메인으로 변환 (부드러운 버전)
     ast_freq_threshold = torch.quantile(ast_freq_attn, 0.4 if strategy == "conservative" else 0.2)
-    ast_active_mask_mel = (ast_freq_attn >= ast_freq_threshold).float()
-    ast_active_mask_lin = ((mel_fb_m2f.T @ ast_active_mask_mel).clamp_min(0.0) > 0.1).float()
+    # 시그모이드 함수로 부드러운 마스크 생성
+    sigmoid_slope = 8.0  # AST 어텐션용 시그모이드 기울기
+    ast_active_mask_mel = torch.sigmoid(sigmoid_slope * (ast_freq_attn - ast_freq_threshold))
+    
+    # mel_fb_m2f 차원 확인 및 조정 (부드러운 버전)
+    if mel_fb_m2f.shape[0] == 128 and mel_fb_m2f.shape[1] == 201:
+        # mel_fb_m2f가 [128, 201] 형태인 경우 - 부드러운 변환
+        ast_active_mask_lin = (mel_fb_m2f.T @ ast_active_mask_mel).clamp_min(0.0)
+    elif mel_fb_m2f.shape[0] == 201 and mel_fb_m2f.shape[1] == 128:
+        # mel_fb_m2f가 [201, 128] 형태인 경우 - 부드러운 변환
+        ast_active_mask_lin = (mel_fb_m2f @ ast_active_mask_mel).clamp_min(0.0)
+    else:
+        # 차원이 맞지 않는 경우 기본값 사용
+        print(f"    ⚠️ mel_fb_m2f shape mismatch: {mel_fb_m2f.shape}, using default mask")
+        ast_active_mask_lin = torch.ones(omega_lin.shape[0], device=omega.device)
     
     # 주파수 가중치 결합
     freq_boost_mask = torch.maximum(high_amp_mask_lin, ast_active_mask_lin)
     
-    # 4. 전략에 따른 가중치 적용
+    # 5. 전략에 따른 가중치 적용 (원본을 넘지 않는 선에서 조정)
     if strategy == "conservative":
-        # 보수적 방식: 2배 가중치
-        freq_weight = 1.0 + freq_boost_mask  # [1.0, 2.0]
+        # 보수적 방식: 템플릿 가중 주파수에 1.5배 가중치 (원본 제한 내)
+        freq_weight = 1.0 + 0.5 * freq_boost_mask  # [1.0, 1.5]
     else:  # aggressive
-        # 공격적 방식: 30% 가중치
-        freq_weight = 1.0 + 0.3 * freq_boost_mask  # [1.0, 1.3]
+        # 공격적 방식: 템플릿 가중 주파수에 1.2배 가중치 (원본 제한 내)
+        freq_weight = 1.0 + 0.2 * freq_boost_mask  # [1.0, 1.2]
     
-    # 5. 기본 마스크 계산
+    # 6. 기본 마스크 계산
     M_base = omega_lin.view(-1, 1) * cos_processed.view(1, -1)
     
-    # 6. 주파수 가중치 적용
+    # 7. 주파수 가중치 적용
     M_weighted = M_base * freq_weight.view(-1, 1)
     
-    # 7. 스펙트로그램 제한
+    # 8. 스펙트로그램 제한 (에너지 보존을 위한 엄격한 제한)
     spec_magnitude = P.sqrt()
+    # 최종 추출 에너지가 원본을 넘지 않도록 제한
     M_lin = torch.minimum(M_weighted, spec_magnitude)
+    M_lin = torch.clamp(M_lin, 0.0, 1.0)  # 1.0으로 제한
     
-    return M_lin
-
-def adaptive_strategy_selection(prev_energy_ratio: float, pass_idx: int) -> str:
-    """
-    이전 결과를 기반으로 적응적 전략 선택
-    """
-    if not USE_ADAPTIVE_STRATEGY:
-        return "conservative"  # 기본값
+    # 8.5. 추가 에너지 보존 검증 (마스크 단계에서)
+    # 각 시간 프레임별로 마스크가 원본을 초과하지 않도록 검증
+    for t in range(T):
+        frame_magnitude = spec_magnitude[:, t]
+        frame_mask = M_lin[:, t]
+        masked_magnitude = frame_mask * frame_magnitude
+        
+        # 해당 프레임에서 마스크된 에너지가 원본 에너지를 초과하는지 확인
+        original_frame_energy = torch.sum(frame_magnitude**2).item()
+        masked_frame_energy = torch.sum(masked_magnitude**2).item()
+        
+        if masked_frame_energy > original_frame_energy * 1.01:  # 1% 허용 오차
+            # 마스크를 스케일링하여 에너지 보존
+            scale_factor = torch.sqrt(torch.tensor(original_frame_energy / (masked_frame_energy + 1e-8), device=M_lin.device))
+            M_lin[:, t] = M_lin[:, t] * scale_factor
     
-    # 첫 번째 패스는 보수적으로 시작
-    if pass_idx == 0:
-        return "conservative"
+    # 9. 동적 임계값 미만인 부분에 대한 특별 처리
+    # 앵커 부분 에너지의 1%에 해당하는 수치만 추출
+    if low_similarity_mask.sum() > 0:  # 동적 임계값 미만인 시간대가 있는 경우
+        # 앵커 영역의 평균 에너지 계산
+        anchor_energy = Ablk.mean().item()
+        target_energy = anchor_energy * 0.01  # 앵커 에너지의 1% (더 강한 분리)
+        
+        scaled_count = 0
+        for t in range(T):
+            if low_similarity_mask[t] > 0:  # 유사도 0.6 미만인 시간대
+                # 해당 시간대의 현재 마스크 값들
+                current_mask_values = M_lin[:, t]
+                
+                # 현재 마스크로 추출되는 에너지 계산
+                current_energy = (current_mask_values * P[:, t]).sum().item()
+                
+                if current_energy > target_energy:
+                    # 목표 에너지에 맞춰 마스크 스케일링
+                    scale_factor = target_energy / (current_energy + 1e-8)
+                    M_lin[:, t] = M_lin[:, t] * scale_factor
+                    scaled_count += 1
+        
+        if scaled_count > 0:
+            print(f"  📊 Low similarity regions: {scaled_count} time frames scaled to 1% anchor energy (threshold: {similarity_threshold:.3f})")
     
-    # 이전에 에너지 보존 문제가 있었으면 보수적으로
-    if prev_energy_ratio > 2.0:
-        return "conservative"
+    # 마스크를 1.0으로 제한 (원본을 초과하지 않도록)
+    M_lin = torch.clamp(M_lin, 0.0, 1.0)
     
-    # 에너지가 너무 적게 추출되었으면 공격적으로
-    if prev_energy_ratio < 1.2:
-        return "aggressive"
+    # 간단한 통계 출력
+    print(f"  📊 Mask ({strategy}): mean={M_lin.mean().item():.3f}, conf={confidence_factor:.3f}, boost={freq_weight.max().item():.1f}x")
     
-    # 기본적으로 보수적 전략 유지
-    return "conservative"
+    return M_lin, cos_t_raw, freq_weight
 
 # =========================
-# Single Pass Processing
+# Main Processing Pipeline
 # =========================
 def single_pass(audio: np.ndarray, extractor, ast_model,
                 mel_fb_m2f: torch.Tensor,
                 used_mask_prev: Optional[torch.Tensor],
-                prev_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor]],
+                prev_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor,torch.Tensor]],
                 pass_idx: int, out_dir: Optional[str], prev_energy_ratio: float = 1.0,
                 separated_time_regions: List[dict] = None,
                 previous_anchors: List[Tuple[int, int]] = None):
 
     t0 = time.time()
+    
+    # 1. 전체 오디오 에너지 체크 및 증폭
+    overall_energy = np.mean(audio**2)
+    amplification_factor = 1.0
+    
+    if overall_energy < MIN_ANCHOR_ENERGY:
+        # 전체 오디오가 작으면 증폭
+        energy_ratio = MIN_ANCHOR_ENERGY / (overall_energy + 1e-8)
+        amplification_factor = min(AMPLIFICATION_FACTOR * np.sqrt(energy_ratio), MAX_AMPLIFICATION)
+        
+        print(f"  🔊 Overall audio energy too low ({overall_energy:.6f}), amplifying by factor: {amplification_factor:.1f}")
+        audio = audio * amplification_factor
+        
+        # 클리핑 방지
+        max_val = np.max(np.abs(audio))
+        if max_val > 1.0:
+            audio = audio / max_val
+            print(f"  ⚠️ Clipping prevented, scaled by {1.0/max_val:.3f}")
+    
+    # 2. 증폭된 오디오로 STFT 계산
     st, mag, P, phase, Xmel = stft_all(audio, mel_fb_m2f)
     fbins, T = P.shape
     La = int(round(ANCHOR_SEC * SR / HOP))
-
-    # 적응적 전략 선택
-    strategy = adaptive_strategy_selection(prev_energy_ratio, pass_idx)
-    print(f"  🎯 Strategy: {strategy}")
 
     # 이전에 분리된 시간대의 에너지 억제 (AST 추론 전에 적용)
     audio_for_ast = audio  # AST용 오디오 (기본값: 원본)
@@ -687,12 +767,12 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
             if time_mask.shape[0] != T:
                 time_mask = align_len_1d(time_mask, T, device=P.device, mode="linear")
             
-            # 에너지 억제 (2%만 남기기)
-            suppression_factor = 0.98  # 98% 억제하여 2%만 남김
+            # 에너지 억제 (0.1%만 남기기) - 훨씬 더 강한 억제
+            suppression_factor = 0.999  # 99.9% 억제하여 0.1%만 남김
             P_suppressed = P * (1.0 - time_mask * suppression_factor)
             P = P_suppressed
             
-            print(f"    📉 Suppressed {class_name_prev} (conf: {confidence_prev:.3f}) to 2% (factor: {suppression_factor:.3f})")
+            print(f"    📉 Suppressed {class_name_prev} (conf: {confidence_prev:.3f}) to 0.1% (factor: {suppression_factor:.3f})")
         
         # 억제된 스펙트로그램을 오디오로 변환하여 AST 모델에 전달
         print(f"  🔄 Converting suppressed spectrogram back to audio for AST inference")
@@ -701,223 +781,526 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         audio_for_ast = torch.istft(stft_suppressed, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, 
                                    window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
 
-    # AST에서 시간과 주파수 어텐션 모두 추출 (분류 결과도 함께) - 억제된 오디오 사용
-    A_t, ast_freq_attn, class_name, sound_type, class_id, confidence = ast_attention_freq_time(audio_for_ast, extractor, ast_model, T, N_MELS)
-    Pur = purity_from_P(P)
-    Sc = anchor_score(A_t, Pur)
+    # AST 어텐션 맵 추출 (매 패스마다 새로 계산)
+    print(f"  🧠 Computing AST attention maps (pass {pass_idx + 1})")
+    A_t, ast_freq_attn, class_name, sound_type, class_id, confidence, top5_classes, attention_matrix = ast_attention_freq_time(audio_for_ast, extractor, ast_model, T, N_MELS, mel_fb_m2f)
+    Pur = calculate_purity(P)
+    
+    # 앵커 스코어 계산 (이전 앵커 영역과 어텐션 상위 30% 패치 제외)
+    if previous_anchors and len(previous_anchors) > 0:
+        print(f"  🎯 Computing anchor score excluding {len(previous_anchors)} previous anchor regions and top 30% attention patches")
+        # 이전 앵커 영역과 어텐션 상위 30% 패치를 제외한 앵커 스코어 계산
+        Sc = anchor_score_with_exclusion(A_t, Pur, previous_anchors, attention_matrix)
+    else:
+        print(f"  🎯 Computing anchor score excluding top 30% attention patches")
+        # 어텐션 상위 30% 패치만 제외한 앵커 스코어 계산
+        Sc = anchor_score_with_exclusion(A_t, Pur, [], attention_matrix)
+
+    print(f"  🎯 Detected: {class_name} ({sound_type}) - Confidence: {confidence:.3f}")
+    
+    # Top 5 클래스 출력
+    print(f"  📊 Top 5 predictions:")
+    for i, (cls_name, prob, cls_id) in enumerate(top5_classes):
+        cls_type = get_sound_type(cls_id)
+        marker = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "  " if i == 3 else "  "
+        print(f"    {marker} {i+1}. {cls_name} ({cls_type}) - {prob:.3f}")
+    
+    # 순수도 계산
+    global_purity = calculate_global_purity(Xmel, None, None)  # 임시로 None 전달
+    
+    # 분리 건너뛰기 확인
+    if should_skip_separation(confidence, global_purity, class_id):
+        print(f"  ⚡ High confidence & purity detected! Skipping separation...")
+        src_amp = audio.copy()
+        res = np.zeros_like(audio)
+        er = 1.0
+        info = {
+            "src_amp": src_amp,
+            "res": res,
+            "er": er,
+            "class_name": class_name,
+            "sound_type": sound_type,
+            "confidence": confidence,
+            "elapsed": time.time() - t0,
+            "separation_skipped": True
+        }
+        return src_amp, res, er, None, info
 
     # Suppress used frames
     if used_mask_prev is not None:
-        um = align_len_1d(used_mask_prev, T, device=Sc.device, mode="linear")
-        k = int(round((USED_DILATE_MS/1000.0)*SR/HOP)); k = ensure_odd(max(1,k))
-        ker = torch.ones(k, device=Sc.device)/k
-        um = (F.conv1d(um.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1) > 0.2).float()
-        Sc = Sc * (1 - 0.85 * um)
+        if used_mask_prev.shape[0] != T:
+            used_mask_prev = align_len_1d(used_mask_prev, T, device=Sc.device, mode="linear")
+        Sc = Sc * (1.0 - used_mask_prev)
 
-    # Enhanced suppression of previous anchors
-    for (sa, ea, prev_w, prev_omega) in prev_anchors:
-        ca = int(((sa+ea)/2) * SR / HOP)
-        ca = max(0, min(T-1, ca))
-        sigma = int(round((ANCHOR_SUPPRESS_MS/1000.0)*SR/HOP))
+    # Suppress previous anchors
+    for prev_s, prev_e, prev_mask, prev_weight, prev_anchor_score in prev_anchors:
+        if prev_mask.shape[0] != T:
+            prev_mask = align_len_1d(prev_mask, T, device=Sc.device, mode="linear")
+        ca = (prev_s + prev_e) // 2
+        sigma = (prev_e - prev_s) / 6.0
         idx = torch.arange(T, device=Sc.device) - ca
-        Sc = Sc * (1 - ANCHOR_SUPPRESS_BASE * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
+        Sc = Sc * (1 - 0.3 * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
         core_s = max(0, ca - La//2); core_e = min(T, ca + La//2)
         Sc[core_s:core_e] *= 0.2
     
-    # Pick anchor and core regions, centered on the peak score (avoiding previous anchors)
-    s, e, core_s_rel, core_e_rel = pick_anchor_region(Sc, La, TOP_PCT_CORE_IN_ANCHOR, previous_anchors)
+    # Pick anchor and core regions using attention and purity (avoiding previous anchors)
+    # previous_anchors에 anchor score 정보를 포함하여 전달
+    prev_anchors_with_score = []
+    for prev_s, prev_e, prev_mask, prev_weight, prev_anchor_score in prev_anchors:
+        prev_anchors_with_score.append((prev_s, prev_e, prev_mask, prev_weight, prev_anchor_score))
+    
+    s, e, core_s_rel, core_e_rel = pick_anchor_region(Sc, La, TOP_PCT_CORE_IN_ANCHOR, prev_anchors_with_score, attention_matrix, Pur)
     
     # Create anchor block (Ablk) based on the core indices
     Ablk = Xmel[:, s:e].clone()
     if core_s_rel > 0:  Ablk[:, :core_s_rel] = 0
     if core_e_rel < La: Ablk[:, core_e_rel:] = 0
 
-    # AST 주파수 어텐션을 고려한 Ω 계산
-    omega = omega_support_with_ast_freq(Ablk, ast_freq_attn, strategy)
-    w_bar = template_from_anchor_block(Ablk, omega)
+    # Generate frequency support and template
+    omega = create_frequency_support(Ablk, ast_freq_attn)
+    w_bar = create_template(Ablk, omega)
     
-    # 적응적 마스킹 전략 적용
-    M_lin = adaptive_masking_strategy(Xmel, w_bar, omega, ast_freq_attn, P, mel_fb_m2f, s, e, strategy)
+    # 적응적 전략 선택
+    strategy = adaptive_strategy_selection(prev_energy_ratio, pass_idx)
+    print(f"  🎯 Strategy: {strategy}")
+    
+    # Create separation mask with adaptive strategy
+    M_lin, cos_t_raw, freq_weight = adaptive_masking_strategy(Xmel, w_bar, omega, ast_freq_attn, P, mel_fb_m2f, s, e, Ablk, confidence, strategy)
     
     # Subtraction in the complex STFT domain for precision
     stft_full = st
     
     # 마스크를 진폭에만 적용하고 위상은 그대로 유지
-    mag_masked = M_lin * mag  # 진폭에 마스크 적용
-    stft_src = mag_masked * torch.exp(1j * phase)  # 복소수 STFT 재구성
+    # 차원 맞추기
+    if M_lin.shape[0] != mag.shape[0]:
+        min_freq = min(M_lin.shape[0], mag.shape[0])
+        M_lin = M_lin[:min_freq, :]
+        mag = mag[:min_freq, :]
+        phase = phase[:min_freq, :]
     
-    # 잔여물 계산: 진폭 기반으로 올바르게 계산 (에너지 보존)
+    # 마스크를 1.0으로 제한하여 원본을 초과하지 않도록 함
+    M_lin = torch.clamp(M_lin, 0.0, 1.0)
+    
+    # === 에너지 보존 마스킹 전략 ===
+    # 디버깅: 차원 확인
+    print(f"  🔍 Debug - M_lin shape: {M_lin.shape}, mag shape: {mag.shape}")
+    print(f"  🔍 Debug - M_lin device: {M_lin.device}, mag device: {mag.device}")
+    print(f"  🔍 Debug - M_lin dtype: {M_lin.dtype}, mag dtype: {mag.dtype}")
+    
+    # 차원 맞추기
+    if M_lin.shape != mag.shape:
+        print(f"  ⚠️ Shape mismatch detected! Adjusting M_lin from {M_lin.shape} to {mag.shape}")
+        # 더 작은 차원으로 맞추기
+        min_freq = min(M_lin.shape[0], mag.shape[0])
+        min_time = min(M_lin.shape[1], mag.shape[1])
+        M_lin = M_lin[:min_freq, :min_time]
+        mag = mag[:min_freq, :min_time]
+        phase = phase[:min_freq, :min_time]
+        print(f"  ✅ Adjusted shapes - M_lin: {M_lin.shape}, mag: {mag.shape}")
+    
+    # 1. 분리 결과용: 마스크를 1.0으로 제한하여 원본을 초과하지 않도록 함
+    M_lin = torch.clamp(M_lin, 0.0, 1.0)
+    mag_masked = M_lin * mag
+    
+    # 2. 잔여물 계산: 정확한 에너지 보존을 위한 뺄셈
     mag_residual = torch.maximum(mag - mag_masked, torch.zeros_like(mag))
-    stft_res = mag_residual * torch.exp(1j * phase)  # 잔여물 복소수 STFT 재구성
     
-    # 디버깅: 뺄셈 결과 검증
-    src_energy = torch.sum(torch.abs(stft_src)**2).item()
-    res_energy = torch.sum(torch.abs(stft_res)**2).item()
-    orig_energy = torch.sum(torch.abs(stft_full)**2).item()
-    total_energy = src_energy + res_energy
+    # 3. 에너지 보존 검증 및 조정
+    original_energy = torch.sum(mag**2).item()
+    masked_energy = torch.sum(mag_masked**2).item()
+    residual_energy = torch.sum(mag_residual**2).item()
+    total_energy = masked_energy + residual_energy
+    energy_ratio = total_energy / (original_energy + 1e-8)
     
-    print(f"  🔍 Energy: Original={orig_energy:.6f}, Source={src_energy:.6f}, Residual={res_energy:.6f}")
-    print(f"  🔍 Energy ratio: Src/Orig={src_energy/(orig_energy+1e-8):.3f}, Res/Orig={res_energy/(orig_energy+1e-8):.3f}")
-    print(f"  🔍 Energy conservation: Total/Orig={total_energy/(orig_energy+1e-8):.3f}")
+    print(f"  📊 Energy: Original={original_energy:.0f}, Masked={masked_energy:.0f}, Residual={residual_energy:.0f}, Ratio={energy_ratio:.3f}")
     
-    # 에너지 보존 검증 및 정규화
-    energy_ratio = total_energy / (orig_energy + 1e-8)
-    if energy_ratio > 1.1:  # 총 에너지가 원본의 110%를 넘으면
-        print(f"  ⚠️ WARNING: Energy not conserved! Total/Orig={energy_ratio:.3f}")
-        # 에너지 정규화
-        scale_factor = orig_energy / (total_energy + 1e-8)
-        scale_tensor = torch.tensor(scale_factor, device=stft_src.device, dtype=stft_src.dtype)
-        stft_src = stft_src * torch.sqrt(scale_tensor)
-        stft_res = stft_res * torch.sqrt(scale_tensor)
-        print(f"  🔧 Scaled energies by factor {scale_factor:.3f}")
-
-    # Reconstruct both source and residual
-    src_amp = torch.istft(stft_src, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, 
+    # 4. 에너지 보존 검증 및 자동 조정
+    if energy_ratio > 1.02:  # 2% 허용 오차
+        print(f"  ⚠️ Energy conservation issue detected (ratio: {energy_ratio:.3f}), adjusting...")
+        # 전체 에너지를 원본에 맞춰 스케일링
+        scale_factor = original_energy / (total_energy + 1e-8)
+        mag_masked = mag_masked * torch.sqrt(torch.tensor(scale_factor, device=mag.device))
+        mag_residual = mag_residual * torch.sqrt(torch.tensor(scale_factor, device=mag.device))
+        
+        # 재계산
+        masked_energy = torch.sum(mag_masked**2).item()
+        residual_energy = torch.sum(mag_residual**2).item()
+        total_energy = masked_energy + residual_energy
+        energy_ratio = total_energy / (original_energy + 1e-8)
+        print(f"  🔧 Energy scaled by factor: {scale_factor:.3f}, new ratio: {energy_ratio:.3f}")
+    
+    # 5. 최종 에너지 보존 검증
+    if energy_ratio < 0.98 or energy_ratio > 1.02:
+        print(f"  ⚠️ Final energy ratio still problematic: {energy_ratio:.3f}")
+    else:
+        print(f"  ✅ Energy conservation achieved: {energy_ratio:.3f}")
+    
+    stft_src = mag_masked * torch.exp(1j * phase)
+    stft_res = mag_residual * torch.exp(1j * phase)
+    
+    # Restore dimensions if needed
+    if stft_src.shape[0] != N_FFT//2 + 1:
+        target_freq = N_FFT//2 + 1
+        if stft_src.shape[0] < target_freq:
+            pad_size = target_freq - stft_src.shape[0]
+            stft_src = F.pad(stft_src, (0, 0, 0, pad_size))
+            stft_res = F.pad(stft_res, (0, 0, 0, pad_size))
+        else:
+            stft_src = stft_src[:target_freq, :]
+            stft_res = stft_res[:target_freq, :]
+    
+    # Inverse STFT
+    src_amp = torch.istft(stft_src, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN,
                          window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
-    res = torch.istft(stft_res, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, 
-                      window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
-
-    # ER calculation
-    e_src = float(np.sum(src_amp**2)); e_res = float(np.sum(res**2))
+    
+    res = torch.istft(stft_res, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN,
+                     window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
+    
+    # 증폭된 경우 최종 결과도 증폭된 상태로 유지
+    if amplification_factor > 1.0:
+        print(f"  🔊 Amplified result (factor: {amplification_factor:.1f})")
+    else:
+        print(f"  📊 No amplification applied")
+    
+    # 진폭 검증 및 정규화 (클리핑 방지)
+    src_max = np.max(np.abs(src_amp))
+    res_max = np.max(np.abs(res))
+    
+    if src_max > 1.0 or res_max > 1.0:
+        print(f"  ⚠️ Clipping prevented (src: {src_max:.3f}, res: {res_max:.3f})")
+        if src_max > 1.0:
+            src_amp = src_amp / (src_max + 1e-8)
+        if res_max > 1.0:
+            res = res / (res_max + 1e-8)
+    
+    # Calculate energy ratio
+    e_src = float(np.sum(src_amp**2))
+    e_res = float(np.sum(res**2))
     er = e_src / (e_src + e_res + 1e-12)
-
-    # Used-frame mask for next pass
-    r_t = (M_lin * P).sum(dim=0) / (P.sum(dim=0) + 1e-8)
-    used_mask = (r_t >= USED_THRESHOLD).float()
-
-    elapsed = time.time() - t0
     
-    # Global purity calculation
-    g_pres = presence_from_energy(Xmel, omega)
-    cos_t_raw = cos_similarity_over_omega(Xmel, w_bar, omega, g_pres)
-    global_purity = cos_t_raw.mean().item()
+    # 시간 마스크 생성 (다음 패스를 위한 에너지 억제용)
+    src_time_mask = torch.zeros(T, device=P.device)
+    src_time_indices = torch.where(M_lin.mean(dim=0) > 0.1)[0]  # 마스크가 0.1 이상인 시간대
+    if len(src_time_indices) > 0:
+        src_time_mask[src_time_indices] = 1.0
     
-    # 앵커 중심 계산 (분리 건너뛰기 로직에서 사용)
-    ca = (s + e) // 2
-    
-    # 분리 건너뛰기 조건 확인
-    if should_skip_separation(confidence, Pur[ca], class_id):
-        print(f"  ⚡ High confidence & purity detected! Skipping separation...")
-        print(f"  📊 Confidence: {confidence:.3f} (≥0.8), Purity: {Pur[ca]:.3f} (≥0.7)")
-        
-        # 원본 오디오를 그대로 반환 (분리하지 않음)
-        src_amp = audio.copy()
-        res = np.zeros_like(audio)
-        er = 1.0  # 전체가 소스로 간주
-        
-        # 정보 반환
-        info = {
-            "er": er,
-            "elapsed": elapsed,
-            "anchor": (s*HOP/SR, e*HOP/SR),
-            "core": ((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR),
-            "quality": 1.0,  # 분리하지 않았으므로 최고 품질
-            "w_bar": w_bar,
-            "omega": omega,
-            "sound_type": sound_type,
-            "sound_detail": class_name,
-            "class_id": class_id,
-            "confidence": confidence,
-            "purity": Pur[ca],
-            "separation_skipped": True,
-            "strategy": strategy,
-            "energy_ratio": 1.0,
-            "db_min": db_min,
-            "db_max": db_max,
-            "db_mean": db_mean
-        }
-        
-        return src_amp, res, er, None, info
-    
-    # Debug plot generation
+    # Debug visualization
     if out_dir is not None:
-        # 필요한 변수들 계산
-        a_raw = amplitude_raw(Xmel, w_bar, omega)
-        cos_t_raw_debug = cos_similarity_over_omega(Xmel, w_bar, omega, presence_from_energy(Xmel, omega))
-        C_t = cos_t_raw_debug  # 별칭
-        
-        # full_map은 AST 어텐션에서 추출 (간단한 버전)
-        full_map = torch.zeros(12, 101)  # 기본 크기
-        
-        png = os.path.join(out_dir, f"debug_pass_{pass_idx+1}.png")
-        debug_plot(pass_idx, Sc, a_raw, cos_t_raw_debug, C_t, P, M_lin, full_map,
-                  s, e, core_s_rel, core_e_rel, ast_freq_attn, src_amp, res, png,
-                  title=f"Pass {pass_idx+1} | Strategy: {strategy} | anchor {s*HOP/SR:.2f}-{e*HOP/SR:.2f}s | ER={er*100:.1f}% [Adaptive Mask]",
-                  original_audio=audio, global_confidence=confidence, global_purity=global_purity)
+        # Calculate similarity for debug visualization
+        g_pres = presence_from_energy(Xmel, omega)
+        cos_t_raw = cos_similarity_over_omega(Xmel, w_bar, omega, g_pres)
+        debug_plot(pass_idx, audio, src_amp, res, Sc, P, M_lin, A_t, ast_freq_attn, 
+                  s, e, core_s_rel, core_e_rel, class_name, confidence, out_dir, 
+                  original_audio=audio, global_confidence=confidence, global_purity=global_purity,
+                  similarity_scores=cos_t_raw, amplification_factor=amplification_factor, attention_map=A_t,
+                  attention_matrix=attention_matrix)
     
-    # 데시벨 계산
+    # Decibel analysis
     db_min, db_max, db_mean = calculate_decibel(src_amp)
     
-    # 분리된 소스의 시간대 정보 계산 (다음 패스에서 에너지 억제용)
-    src_time_mask = (M_lin.sum(dim=0) > 1e-6).float()  # 분리된 시간 프레임들
-    src_time_indices = torch.where(src_time_mask > 0)[0]  # 분리된 시간 인덱스들
-    
     info = {
+        "src_amp": src_amp,
+        "res": res,
         "er": er,
-        "elapsed": elapsed,
-        "anchor": (s*HOP/SR, e*HOP/SR),
-        "core": ((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR),
-        "quality": float(M_lin.mean().item()),
-        "w_bar": w_bar,
-        "omega": omega,
-        "stopped": False,
-        "strategy": strategy,
-        "energy_ratio": energy_ratio,
         "class_name": class_name,
         "sound_type": sound_type,
         "class_id": class_id,
         "confidence": confidence,
+        "elapsed": time.time() - t0,
+        "separation_skipped": False,
+        "src_time_mask": src_time_mask,
+        "src_time_indices": src_time_indices,
+        "anchor_region": (s, e),  # 앵커 구간 정보 추가
+        "anchor_score": Sc,  # 현재 패스의 anchor score 추가
         "db_min": db_min,
         "db_max": db_max,
-        "db_mean": db_mean,
-        "src_time_mask": src_time_mask,  # 분리된 시간 마스크
-        "src_time_indices": src_time_indices,  # 분리된 시간 인덱스
-        "anchor_region": (s, e)  # 앵커 구간 정보 추가
+        "db_mean": db_mean
     }
-    return src_amp, res, er, used_mask, info
+    
+    return src_amp, res, er, None, info
 
 # =========================
-# Main Processing Pipeline
+# Debug Visualization
+# =========================
+def debug_plot(pass_idx: int, audio: np.ndarray, src_amp: np.ndarray, res: np.ndarray,
+               anchor_score: torch.Tensor, P: torch.Tensor, M_lin: torch.Tensor,
+               A_t: torch.Tensor, ast_freq_attn: torch.Tensor,
+               s: int, e: int, core_s_rel: int, core_e_rel: int,
+               class_name: str, confidence: float, out_dir: str,
+               original_audio: np.ndarray = None, global_confidence: float = None, global_purity: float = None,
+               similarity_scores: torch.Tensor = None, amplification_factor: float = 1.0, attention_map: torch.Tensor = None,
+               attention_matrix: torch.Tensor = None):
+    """Create comprehensive debug visualization (9 plots)"""
+    try:
+        fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+        fig.suptitle(f'Pass {pass_idx + 1}: {class_name} (Conf: {confidence:.3f})', fontsize=16, fontweight='bold')
+        
+        # 1. Original Audio Waveform
+        axes[0, 0].plot(audio, 'b-', alpha=0.7, linewidth=0.5)
+        axes[0, 0].set_title('Original Audio', fontweight='bold')
+        axes[0, 0].set_ylabel('Amplitude')
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].set_xlim(0, len(audio))
+        
+        # 2. Separated Source Waveform
+        axes[0, 1].plot(src_amp, 'g-', alpha=0.7, linewidth=0.5)
+        axes[0, 1].set_title('Separated Source', fontweight='bold')
+        axes[0, 1].set_ylabel('Amplitude')
+        axes[0, 1].grid(True, alpha=0.3)
+        axes[0, 1].set_xlim(0, len(src_amp))
+        
+        # 3. Residual Audio Waveform
+        axes[0, 2].plot(res, 'r-', alpha=0.7, linewidth=0.5)
+        axes[0, 2].set_title('Residual Audio', fontweight='bold')
+        axes[0, 2].set_ylabel('Amplitude')
+        axes[0, 2].grid(True, alpha=0.3)
+        axes[0, 2].set_xlim(0, len(res))
+        
+        # 4. Power Spectrogram (log scale with adaptive range)
+        P_log = torch.log10(P + 1e-10)
+        vmin, vmax = torch.quantile(P_log, torch.tensor([0.05, 0.95]))
+        im1 = axes[1, 0].imshow(P_log.cpu().numpy(), aspect='auto', origin='lower', 
+                               cmap='viridis', vmin=vmin.item(), vmax=vmax.item())
+        axes[1, 0].set_title('Power Spectrogram (log scale)', fontweight='bold')
+        axes[1, 0].set_ylabel('Frequency Bin')
+        axes[1, 0].set_xlabel('Time Frame')
+        plt.colorbar(im1, ax=axes[1, 0], fraction=0.046, pad=0.04)
+        
+        # 5. Separation Mask
+        im2 = axes[1, 1].imshow(M_lin.cpu().numpy(), aspect='auto', origin='lower', 
+                               cmap='hot', vmin=0, vmax=1)
+        axes[1, 1].set_title('Generated Separation Mask', fontweight='bold')
+        axes[1, 1].set_ylabel('Frequency Bin')
+        axes[1, 1].set_xlabel('Time Frame')
+        plt.colorbar(im2, ax=axes[1, 1], fraction=0.046, pad=0.04)
+        
+        # 6. AST Time Attention vs Anchor Score 비교 (정확한 시간 매핑)
+        time_frames = np.arange(len(A_t))
+        # 시간 축을 실제 초 단위로 변환
+        time_seconds = time_frames * (len(audio) / SR) / len(A_t)  # STFT 프레임 → 실제 시간(초)
+        
+        axes[1, 2].plot(time_seconds, A_t.cpu().numpy(), 'purple', linewidth=2, label='AST Time Attention', alpha=0.7)
+        axes[1, 2].plot(time_seconds, anchor_score.cpu().numpy(), 'orange', linewidth=2, label='Anchor Score (A+P)', alpha=0.8)
+        
+        # 최고점 표시 (시간으로 변환)
+        max_attn_idx = torch.argmax(A_t).item()
+        max_anchor_idx = torch.argmax(anchor_score).item()
+        max_attn_time = time_seconds[max_attn_idx]
+        max_anchor_time = time_seconds[max_anchor_idx]
+        axes[1, 2].axvline(max_attn_time, color='purple', linestyle='--', alpha=0.5, label=f'Max AST Attn ({max_attn_time:.2f}s)')
+        axes[1, 2].axvline(max_anchor_time, color='orange', linestyle='--', alpha=0.5, label=f'Max Anchor Score ({max_anchor_time:.2f}s)')
+        
+        # 선택된 앵커 영역 표시 (시간으로 변환)
+        anchor_start_time = time_seconds[s]
+        anchor_end_time = time_seconds[e]
+        core_start_time = time_seconds[s + core_s_rel]
+        core_end_time = time_seconds[s + core_e_rel]
+        axes[1, 2].axvspan(anchor_start_time, anchor_end_time, alpha=0.3, color='yellow', label=f'Selected Anchor ({anchor_start_time:.2f}-{anchor_end_time:.2f}s)')
+        axes[1, 2].axvspan(core_start_time, core_end_time, alpha=0.5, color='red', label=f'Core Region ({core_start_time:.2f}-{core_end_time:.2f}s)')
+        
+        axes[1, 2].set_title('AST Attention vs Anchor Score (Time Mapped)', fontweight='bold')
+        axes[1, 2].set_ylabel('Score')
+        axes[1, 2].set_xlabel('Time (seconds)')
+        axes[1, 2].legend()
+        axes[1, 2].grid(True, alpha=0.3)
+        
+        # 7. Time-based Cosine Similarity (정확한 시간 매핑)
+        if similarity_scores is not None:
+            time_frames = np.arange(len(similarity_scores))
+            time_seconds = time_frames * (len(audio) / SR) / len(similarity_scores)  # STFT 프레임 → 실제 시간(초)
+            
+            axes[2, 0].plot(time_seconds, similarity_scores.cpu().numpy(), 'orange', linewidth=2, label='Cosine Similarity')
+            
+            # 동적 임계값 표시 (AST 신뢰도 기반)
+            dynamic_threshold = global_confidence if global_confidence is not None else 0.6
+            axes[2, 0].axhline(y=dynamic_threshold, color='red', linestyle='--', alpha=0.7, 
+                              label=f'Dynamic Threshold ({dynamic_threshold:.3f})')
+            
+            # 선택된 앵커 영역 표시 (시간으로 변환)
+            anchor_start_time = time_seconds[s]
+            anchor_end_time = time_seconds[e]
+            axes[2, 0].axvspan(anchor_start_time, anchor_end_time, alpha=0.3, color='yellow', 
+                             label=f'Selected Anchor ({anchor_start_time:.2f}-{anchor_end_time:.2f}s)')
+            
+            axes[2, 0].set_title('Time-based Cosine Similarity (Time Mapped)', fontweight='bold')
+            axes[2, 0].set_ylabel('Similarity Score')
+            axes[2, 0].set_xlabel('Time (seconds)')
+            axes[2, 0].legend()
+            axes[2, 0].grid(True, alpha=0.3)
+            axes[2, 0].set_ylim(0, 1)
+        else:
+            # Fallback to AST Frequency Attention if similarity not available
+            axes[2, 0].plot(ast_freq_attn.cpu().numpy(), 'orange', linewidth=2)
+            axes[2, 0].set_title('AST Frequency Attention', fontweight='bold')
+            axes[2, 0].set_ylabel('Attention Weight')
+            axes[2, 0].set_xlabel('Mel Frequency Bin')
+            axes[2, 0].grid(True, alpha=0.3)
+        
+        # 8. Anchor Score 상세 분석 (정확한 시간 매핑)
+        time_frames = np.arange(len(anchor_score))
+        time_seconds = time_frames * (len(audio) / SR) / len(anchor_score)  # STFT 프레임 → 실제 시간(초)
+        
+        axes[2, 1].plot(time_seconds, anchor_score.cpu().numpy(), 'cyan', linewidth=2, label='Final Anchor Score')
+        
+        # 최고점과 선택된 앵커 비교 (시간으로 변환)
+        max_score_idx = torch.argmax(anchor_score).item()
+        max_score_time = time_seconds[max_score_idx]
+        anchor_start_time = time_seconds[s]
+        anchor_end_time = time_seconds[e]
+        core_start_time = time_seconds[s + core_s_rel]
+        core_end_time = time_seconds[s + core_e_rel]
+        
+        axes[2, 1].axvline(max_score_time, color='cyan', linestyle='--', alpha=0.7, label=f'Max Score ({max_score_time:.2f}s)')
+        axes[2, 1].axvspan(anchor_start_time, anchor_end_time, alpha=0.3, color='yellow', label=f'Selected Anchor ({anchor_start_time:.2f}-{anchor_end_time:.2f}s)')
+        axes[2, 1].axvspan(core_start_time, core_end_time, alpha=0.5, color='red', label=f'Core Region ({core_start_time:.2f}-{core_end_time:.2f}s)')
+        
+        # 점수 차이 표시
+        max_score = anchor_score[max_score_idx].item()
+        selected_score = anchor_score[s + (e-s)//2].item()  # 선택된 앵커 중앙점의 점수
+        axes[2, 1].text(0.02, 0.98, f'Max: {max_score:.3f} at {max_score_time:.2f}s\nSelected: {selected_score:.3f} at {anchor_start_time:.2f}-{anchor_end_time:.2f}s', 
+                       transform=axes[2, 1].transAxes, verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        axes[2, 1].set_title('Anchor Score Analysis (Time Mapped)', fontweight='bold')
+        axes[2, 1].set_ylabel('Score')
+        axes[2, 1].set_xlabel('Time (seconds)')
+        axes[2, 1].legend()
+        axes[2, 1].grid(True, alpha=0.3)
+        
+        # Add similarity threshold line if available
+        if similarity_scores is not None:
+            axes[2, 1].axhline(y=0.6, color='red', linestyle='--', alpha=0.7, label='Similarity Threshold (0.6)')
+            axes[2, 1].legend()
+        
+        # 9. Energy Analysis with Similarity Statistics
+        time_frames = np.arange(len(anchor_score))
+        original_energy = np.sum(audio**2)
+        src_energy = np.sum(src_amp**2)
+        res_energy = np.sum(res**2)
+        
+        energy_data = [original_energy, src_energy, res_energy]
+        energy_labels = ['Original', 'Source', 'Residual']
+        colors = ['blue', 'green', 'red']
+        
+        # AST Attention Matrix (2D)
+        if attention_matrix is not None:
+            # AST 어텐션 매트릭스 시각화 (크롭된 실제 오디오 부분)
+            attn_matrix_np = attention_matrix.cpu().numpy()
+            im = axes[2, 2].imshow(attn_matrix_np, aspect='auto', cmap='viridis', origin='lower')
+            axes[2, 2].set_title(f'AST Attention Matrix ({attn_matrix_np.shape[0]}x{attn_matrix_np.shape[1]})', fontweight='bold')
+            axes[2, 2].set_xlabel('Time Patches')
+            axes[2, 2].set_ylabel('Frequency Patches')
+            
+            # Colorbar 추가
+            plt.colorbar(im, ax=axes[2, 2], fraction=0.046, pad=0.04)
+            
+            # 앵커 영역 하이라이트 (정확한 시간 매핑)
+            if s is not None and e is not None:
+                # 시간 프레임을 AST 패치로 변환 (크롭된 맵 기준)
+                time_patches = attn_matrix_np.shape[1]  # 크롭된 맵의 시간 패치 수
+                total_time_frames = len(anchor_score)
+                
+                # STFT 프레임을 AST 패치로 정확히 변환
+                patch_s = int((s / total_time_frames) * time_patches)
+                patch_e = int((e / total_time_frames) * time_patches)
+                
+                # 시간 정보도 표시
+                anchor_start_time = (s / total_time_frames) * (len(audio) / SR)
+                anchor_end_time = (e / total_time_frames) * (len(audio) / SR)
+                
+                axes[2, 2].axvspan(patch_s, patch_e, alpha=0.3, color='red', 
+                                 label=f'Anchor Region ({anchor_start_time:.2f}-{anchor_end_time:.2f}s)')
+                axes[2, 2].legend()
+                
+                # X축을 시간으로 표시
+                time_ticks = np.linspace(0, time_patches-1, 5)
+                time_labels = [f'{(i/time_patches) * (len(audio)/SR):.2f}s' for i in time_ticks]
+                axes[2, 2].set_xticks(time_ticks)
+                axes[2, 2].set_xticklabels(time_labels)
+        else:
+            # Fallback: show energy ratio as text
+            axes[2, 2].text(0.5, 0.5, f'Energy Ratio: {energy_ratio:.3f}', 
+                           ha='center', va='center', transform=axes[2, 2].transAxes, 
+                           fontsize=14, fontweight='bold')
+            axes[2, 2].set_title('Energy Ratio', fontweight='bold')
+            axes[2, 2].axis('off')
+        
+        # Add similarity statistics and energy ratio info as text
+        if similarity_scores is not None:
+            low_sim_count = (similarity_scores < 0.6).sum().item()
+            high_sim_count = (similarity_scores >= 0.6).sum().item()
+            total_frames = len(similarity_scores)
+            low_sim_pct = (low_sim_count / total_frames) * 100
+            high_sim_pct = (high_sim_count / total_frames) * 100
+            
+            # Energy ratio calculation
+            energy_ratio = src_energy / (src_energy + res_energy + 1e-8)
+            
+            # Amplification info
+            amp_info = f' (Amp: {amplification_factor:.1f}x)' if amplification_factor > 1.0 else ''
+            
+            stats_text = f'Similarity Stats:\nLow (<0.6): {low_sim_count} ({low_sim_pct:.1f}%)\nHigh (≥0.6): {high_sim_count} ({high_sim_pct:.1f}%)\n\nEnergy Ratio: {energy_ratio:.3f}{amp_info}'
+            axes[2, 2].text(0.02, 0.98, stats_text, transform=axes[2, 2].transAxes, 
+                           verticalalignment='top', fontsize=8, 
+                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        # Ensure output directory exists
+        os.makedirs(out_dir, exist_ok=True)
+        debug_path = os.path.join(out_dir, f'debug_pass_{pass_idx + 1}.png')
+        plt.savefig(debug_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  📊 Debug plot saved: {debug_path}")
+        
+    except Exception as e:
+        print(f"  ❌ Debug plot failed: {e}")
+
+# =========================
+# Main Function
 # =========================
 def main():
-    ap = argparse.ArgumentParser(description="AST-guided Source Separator")
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--passes", type=int, default=MAX_PASSES)
-    ap.add_argument("--no-debug", action="store_true")
-    ap.add_argument("--strategy", choices=["conservative", "aggressive", "adaptive"], default="adaptive")
+    ap = argparse.ArgumentParser(description="AST-guided Source Separator (Final Integrated Version)")
+    ap.add_argument("--input", required=True, help="Input audio file")
+    ap.add_argument("--output", required=True, help="Output directory")
+    ap.add_argument("--passes", type=int, default=MAX_PASSES, help="Number of separation passes")
+    ap.add_argument("--no-debug", action="store_true", help="Disable debug visualization")
+    ap.add_argument("--strategy", choices=["conservative", "aggressive", "adaptive"], default="adaptive", help="Masking strategy")
+    ap.add_argument("--device", default="cpu", help="Device (cpu/cuda)")
+    
     args = ap.parse_args()
-
-    # 전역 전략 설정
-    global USE_ADAPTIVE_STRATEGY
-    if args.strategy == "adaptive":
-        USE_ADAPTIVE_STRATEGY = True
-    else:
-        USE_ADAPTIVE_STRATEGY = False
-
+    
+    # Device setup
+    device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
+    print(f"Device: {device}")
+    
     os.makedirs(args.output, exist_ok=True)
-
+    
+    # Load audio
     audio0 = load_fixed_audio(args.input)
-    print(f"\n{'='*64}\n🎵 AST-guided Source Separator\n{'='*64}")
-    print(f"Input: fixed {WIN_SEC:.3f}s, Anchor: {ANCHOR_SEC:.3f}s, Passes: {args.passes}")
+    print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Final Integrated Version)\n{'='*64}")
+    print(f"Input: {args.input} ({len(audio0)/SR:.3f}s)")
     print(f"Strategy: {args.strategy}")
-    print(f"Features: Adaptive Masking, Energy Conservation, Classification, Decibel Analysis")
-
-    # Mel FB: [F,M] -> [M,F]
+    print(f"Features: Adaptive Masking, Energy Conservation, Classification, Energy Suppression")
+    print(f"Debug visualization: {'OFF' if args.no_debug else 'ON'}")
+    
+    # Mel filterbank setup
     fbins = N_FFT//2 + 1
     mel_fb_f2m = torchaudio.functional.melscale_fbanks(
         n_freqs=fbins, f_min=0.0, f_max=SR/2, n_mels=N_MELS,
         sample_rate=SR, norm="slaney"
     )
     mel_fb_m2f = mel_fb_f2m.T.contiguous()
-
-    # AST (CPU)
+    
+    # AST model setup
     extractor = ASTFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
     ast_model = ASTForAudioClassification.from_pretrained(
         "MIT/ast-finetuned-audioset-10-10-0.4593",
         attn_implementation="eager"
-    ).eval()
-
+    ).to(device).eval()
+    
+    # Processing variables
     cur = audio0.copy()
     used_mask_prev = None
     prev_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor]] = []
@@ -926,120 +1309,93 @@ def main():
     prev_energy_ratio = 1.0
     separated_time_regions = []  # 이전에 분리된 시간대 정보 저장
     previous_anchors = []  # 이전 패스에서 사용된 앵커 구간 정보
-
+    
+    # Main processing loop
     for i in range(max(1, args.passes)):
-        print(f"\n▶ Pass {i+1}/{args.passes}")
-        result = single_pass(
-            cur, extractor, ast_model, mel_fb_m2f,
-            used_mask_prev, prev_anchors,
-            pass_idx=i, out_dir=None if args.no_debug else args.output,
-            prev_energy_ratio=prev_energy_ratio,
-            separated_time_regions=separated_time_regions,
-            previous_anchors=previous_anchors
+        print(f"\n--- Pass {i + 1} ---")
+        print(f"AST call #{i + 1} for attention extraction...")
+        
+        src_amp, res, er, used_mask, info = single_pass(
+            cur, extractor, ast_model, mel_fb_m2f, used_mask_prev, prev_anchors, 
+            i, args.output if not args.no_debug else None, prev_energy_ratio,
+            separated_time_regions, previous_anchors
         )
         
-        if result[0] is None:
-            info = result[4]
-            reason = info.get("reason", "stopped")
-            print(f"  ⏹️ Stopped: {reason}")
-            break
-        
-        src, res, er, used_mask_prev, info = result
-        
-        # 분류 정보 출력
-        class_name = info['class_name']
-        sound_type = info['sound_type']
-        class_id = info['class_id']
-        confidence = info['confidence']
-        strategy = info['strategy']
-        energy_ratio = info['energy_ratio']
-        db_min, db_max, db_mean = info['db_min'], info['db_max'], info['db_mean']
-        
-        # 분리 건너뛰기 여부 확인
-        separation_skipped = info.get('separation_skipped', False)
-        
-        if separation_skipped:
-            print(f"⏱️ pass{i+1}: {info['elapsed']:.3f}s | anchor {info['anchor'][0]:.2f}-{info['anchor'][1]:.2f}s | SKIPPED")
-            print(f"  🎯 Strategy: {strategy} | Separation: SKIPPED (High confidence & purity)")
-            print(f"  🎵 Class: {class_name} (ID: {class_id}) | Type: {sound_type} | Confidence: {confidence:.3f}")
-            print(f"  🔊 Decibel: min={db_min:.1f}dB, max={db_max:.1f}dB, mean={db_mean:.1f}dB")
+        # Save separated source
+        if info.get("separation_skipped", False):
+            print(f"  ⚡ Separation skipped - using original audio")
+            src_path = os.path.join(args.output, f"{i:02d}_{info['class_name']}.wav")
         else:
-            print(f"⏱️ pass{i+1}: {info['elapsed']:.3f}s | anchor {info['anchor'][0]:.2f}-{info['anchor'][1]:.2f}s"
-                  f" | core {info['core'][0]:.2f}-{info['core'][1]:.2f}s | ER={er*100:.1f}%")
-            print(f"  🎯 Strategy: {strategy} | Energy Ratio: {energy_ratio:.3f}")
-            print(f"  🎵 Class: {class_name} (ID: {class_id}) | Type: {sound_type} | Confidence: {confidence:.3f}")
-            print(f"  🔊 Decibel: min={db_min:.1f}dB, max={db_max:.1f}dB, mean={db_mean:.1f}dB")
-
-        if er < MIN_ERATIO:
-            print("  ⚠️ Too little energy; stopping.")
-            break
+            src_path = os.path.join(args.output, f"{i:02d}_{info['class_name']}.wav")
         
-        # 분리된 시간대 정보 수집 (다음 패스에서 에너지 억제용) - 분리 건너뛰기 시에는 수집하지 않음
-        if not separation_skipped:
-            src_time_mask = info.get('src_time_mask')
-            if src_time_mask is not None:
-                separated_time_regions.append({
-                    'pass': i + 1,
-                    'class_name': class_name,
-                    'time_mask': src_time_mask,
-                    'time_indices': info.get('src_time_indices', []),
-                    'confidence': confidence
-                })
-                print(f"  📊 Collected {len(separated_time_regions)} separated time regions for energy suppression")
-            
-            # 앵커 구간 정보 수집
-            if 'anchor_region' in info:
-                previous_anchors.append(info['anchor_region'])
-                print(f"  📍 Added anchor region {info['anchor_region']} to avoid list")
-
-        # Peak Normalization for clear output
-        peak = np.max(np.abs(src))
-        if peak > 1e-8:
-            gain = NORMALIZE_TARGET_PEAK / peak
-            src = src * gain
-            src = np.clip(src, -1.0, 1.0)
-
-        # 클래스명을 포함한 파일명 생성
-        safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        safe_class_name = safe_class_name.replace(' ', '_')
-        out_src = os.path.join(args.output, f"{i+1:02d}_{safe_class_name}_{sound_type}.wav")
-        torchaudio.save(out_src, torch.from_numpy(src).unsqueeze(0), SR)
-        print(f"    ✅ Saved (Normalized): {out_src}")
-
-        cur = res
-        prev_anchors.append((info["anchor"][0], info["anchor"][1], info["w_bar"], info["omega"]))
-        prev_energy_ratio = energy_ratio
+        torchaudio.save(src_path, torch.from_numpy(src_amp).unsqueeze(0), SR)
         saved += 1
-
-    # Apply Hard Clipping to the final residual
-    if RESIDUAL_CLIP_THR > 0:
-        print(f"\nApplying residual clipping with threshold: {RESIDUAL_CLIP_THR}")
-        cur[np.abs(cur) < RESIDUAL_CLIP_THR] = 0.0
+        
+        print(f"  Separated: {info['class_name']} ({info['sound_type']})")
+        print(f"  Confidence: {info['confidence']:.3f}")
+        print(f"  Energy Ratio: {er:.3f}")
+        print(f"  Elapsed: {info['elapsed']:.2f}s")
+        
+        # 분리된 시간대 정보 수집 (분리 건너뛰기가 아닌 경우만)
+        if not info.get("separation_skipped", False):
+            separated_time_regions.append({
+                'time_mask': info['src_time_mask'],
+                'class_name': info['class_name'],
+                'confidence': info['confidence'],
+                'pass_idx': i
+            })
+            
+            # 앵커 구간 정보 수집 (anchor score 포함)
+            if 'anchor_region' in info and 'anchor_score' in info:
+                prev_anchors.append((
+                    info['anchor_region'][0],  # prev_s
+                    info['anchor_region'][1],  # prev_e
+                    info['src_time_mask'],     # prev_mask
+                    torch.ones_like(info['src_time_mask']),  # prev_weight (기본값)
+                    info['anchor_score']       # prev_anchor_score
+                ))
+        
+        # Update for next pass
+        prev_energy_ratio = er
+        cur = res
+        used_mask_prev = used_mask
+        
+        # Early termination if energy ratio is too low AND residual energy is also low
+        residual_energy = float(np.sum(res**2))
+        if er < MIN_ERATIO and residual_energy < 0.001:  # 잔여물 에너지도 낮을 때만 종료
+            print(f"  ⚠️ Energy ratio {er:.3f} below threshold {MIN_ERATIO} and residual energy {residual_energy:.6f} too low, stopping...")
+            break
+        elif er < MIN_ERATIO:
+            print(f"  ⚠️ Energy ratio {er:.3f} below threshold {MIN_ERATIO}, but residual energy {residual_energy:.6f} is sufficient, continuing...")
     
-    # Residual 분류 (신뢰도 0.7 기준)
-    print(f"\n🔍 Classifying residual audio...")
-    res_class_name, res_sound_type, res_class_id, res_confidence = classify_audio_segment(cur, extractor, ast_model)
-    res_db_min, res_db_max, res_db_mean = calculate_decibel(cur)
+    # Final residual classification
+    if len(cur) > 0 and np.max(np.abs(cur)) > 1e-6:
+        print(f"\n--- Final Residual Classification ---")
+        class_name, sound_type, class_id, confidence, top5_classes = classify_audio_segment(cur, extractor, ast_model)
+        print(f"  🎯 Residual: {class_name} ({sound_type}) - Confidence: {confidence:.3f}")
+        
+        # Top 5 클래스 출력
+        print(f"  📊 Top 5 residual predictions:")
+        for i, (cls_name, prob, cls_id) in enumerate(top5_classes):
+            cls_type = get_sound_type(cls_id)
+            marker = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "  " if i == 3 else "  "
+            print(f"    {marker} {i+1}. {cls_name} ({cls_type}) - {prob:.3f}")
+        
+        if confidence >= RESIDUAL_CONFIDENCE_THRESHOLD:
+            print(f"  ✅ High confidence residual detected, saving as sound...")
+            residual_path = os.path.join(args.output, f"{saved:02d}_{class_name}.wav")
+            torchaudio.save(residual_path, torch.from_numpy(cur).unsqueeze(0), SR)
+            saved += 1
+        else:
+            print(f"  📝 Low confidence residual, saving as residual...")
+            residual_path = os.path.join(args.output, f"{saved:02d}_residual.wav")
+            torchaudio.save(residual_path, torch.from_numpy(cur).unsqueeze(0), SR)
     
-    print(f"  🎵 Residual Class: {res_class_name} (ID: {res_class_id}) | Type: {res_sound_type} | Confidence: {res_confidence:.3f}")
-    print(f"  🔊 Residual Decibel: min={res_db_min:.1f}dB, max={res_db_max:.1f}dB, mean={res_db_mean:.1f}dB")
-    
-    # 신뢰도 0.7 기준으로 파일명 결정
-    if res_confidence >= 0.7:
-        safe_res_class_name = "".join(c for c in res_class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        safe_res_class_name = safe_res_class_name.replace(' ', '_')
-        out_res = os.path.join(args.output, f"00_{safe_res_class_name}_{res_sound_type}.wav")
-        print(f"  ✅ High confidence ({res_confidence:.3f} ≥ 0.7), using class name: {res_class_name}")
-    else:
-        out_res = os.path.join(args.output, "00_residual.wav")
-        print(f"  ⚠️ Low confidence ({res_confidence:.3f} < 0.7), using generic name")
-    
-    torchaudio.save(out_res, torch.from_numpy(cur).unsqueeze(0), SR)
-
-    total_elapsed = time.time() - total_t0
-    print(f"\n💾 Residual: {out_res}")
-    print(f"⏱️ Total: {total_elapsed:.3f}s")
-    print(f"✅ Done. Separated: {saved}\n")
+    total_time = time.time() - total_t0
+    print(f"\n{'='*64}")
+    print(f"✅ Processing completed in {total_time:.2f}s")
+    print(f"📁 Saved {saved} audio files to {args.output}")
+    print(f"{'='*64}")
 
 if __name__ == "__main__":
     main()

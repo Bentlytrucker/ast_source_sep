@@ -99,7 +99,7 @@ class SoundTrigger:
         return device_index, max_in_ch
     
     def _to_mono_int16(self, interleaved: np.ndarray, num_channels: int) -> np.ndarray:
-        """멀티채널 int16 interleaved -> 모노 int16 (채널5 우선, 없으면 마이크 평균)"""
+        """멀티채널 int16 interleaved -> 모노 int16 (Channel 0만 사용)"""
         if num_channels <= 1:
             return interleaved.astype(np.int16)
 
@@ -109,34 +109,21 @@ class SoundTrigger:
             interleaved = interleaved[:usable_len]
         x = interleaved.reshape(-1, num_channels)
 
-        # 채널 5가 있으면 (ReSpeaker post-processed/beamformed) 그 채널만 사용
-        if num_channels >= 6:
-            # 채널 5가 모두 0인지 확인
-            if np.all(x[:, 5] == 0):
-                # 채널 0-3 (마이크 채널) 평균 사용
-                mono = np.mean(x[:, :4], axis=1).astype(np.int16)
-            else:
-                mono = x[:, 5].astype(np.int16)
-        else:
-            # 일반 마이크 채널 평균 (가능하면 앞쪽 4채널만 평균)
-            mic_cols = min(num_channels, 4)
-            mono = np.mean(x[:, :mic_cols], axis=1).astype(np.int16)
+        # Channel 0만 사용 (ReSpeaker USB Mic Array의 후처리된 오디오)
+        mono = x[:, 0].astype(np.int16)
         
         return mono
 
     def _calculate_db_level(self, interleaved: np.ndarray, num_channels: int) -> float:
-        """dB 레벨 계산"""
+        """dB 레벨 계산 (Channel 0만 사용)"""
         if num_channels <= 1:
             audio_data = interleaved.astype(np.float32)
         else:
             usable_len = (len(interleaved) // num_channels) * num_channels
             x = interleaved[:usable_len].reshape(-1, num_channels)
 
-            # 채널 0만 사용 (ReSpeaker 4 Mic Array에서 실제로 사용되는 채널)
-            if num_channels >= 1:
-                audio_data = x[:, 0].astype(np.float32)  # 채널 0만 사용
-            else:
-                audio_data = interleaved.astype(np.float32)
+            # Channel 0만 사용 (ReSpeaker USB Mic Array의 후처리된 오디오)
+            audio_data = x[:, 0].astype(np.float32)
 
         # RMS 계산
         rms = np.sqrt(np.mean(audio_data**2))
@@ -160,16 +147,14 @@ class SoundTrigger:
             return -np.inf
 
     def _level_for_trigger(self, interleaved: np.ndarray, num_channels: int) -> float:
-        """트리거 판정 레벨(RMS 또는 abs max). 채널5가 있으면 그 채널 기준."""
+        """트리거 판정 레벨(RMS 또는 abs max) - Channel 0만 사용"""
         if num_channels <= 1:
             return float(np.max(np.abs(interleaved)))
         usable_len = (len(interleaved) // num_channels) * num_channels
         x = interleaved[:usable_len].reshape(-1, num_channels)
 
-        if num_channels >= 6:
-            ch = x[:, 5].astype(np.int16)
-        else:
-            ch = np.mean(x[:, :min(num_channels, 4)], axis=1).astype(np.int16)
+        # Channel 0만 사용 (ReSpeaker USB Mic Array의 후처리된 오디오)
+        ch = x[:, 0].astype(np.int16)
 
         return float(np.max(np.abs(ch)))
 

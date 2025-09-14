@@ -248,6 +248,9 @@ class SoundSeparator:
         except Exception as e:
             print(f"[Separator] ❌ Model loading error: {e}")
             print("[Separator] 실전 모드에서는 모델 로딩이 필수입니다!")
+            import traceback
+            print("[Separator] Full error traceback:")
+            traceback.print_exc()
             self.is_available = False
     
     def _get_sound_type(self, class_id: int) -> str:

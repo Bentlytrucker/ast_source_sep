@@ -87,6 +87,17 @@ class SingleSoundPipeline:
             self.led_controller  # LED 컨트롤러 주입
         )
         
+        # 모델 초기화 상태 확인
+        if hasattr(self.sound_separator, 'is_available') and self.sound_separator.is_available:
+            print("✅ Sound Separator initialized successfully")
+        else:
+            print("❌ Sound Separator initialization failed!")
+            print("🔍 Checking model availability...")
+            if hasattr(self.sound_separator, 'is_model_available'):
+                print(f"Model available: {self.sound_separator.is_model_available()}")
+            else:
+                print("is_model_available method not found")
+        
         print("=== Single Thread Pipeline Ready ===")
     
     def _main_loop(self):

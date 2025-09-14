@@ -254,13 +254,25 @@ class SoundSeparator:
             self.extractor = ASTFeatureExtractor.from_pretrained(self.model_name)
             print("[Separator] ✅ AST Feature Extractor loaded")
             
-            # 7. AST Model 로딩
+            # 7. AST Model 로딩 (구버전 transformers 호환성)
             print(f"[Separator] 🔍 Loading AST Model: {self.model_name}")
-            self.ast_model = ASTForAudioClassification.from_pretrained(
-                self.model_name,
-                attn_implementation="eager"  # Raspberry Pi 호환성
-            )
-            print("[Separator] ✅ AST Model loaded from pretrained")
+            try:
+                # 최신 transformers 버전용
+                self.ast_model = ASTForAudioClassification.from_pretrained(
+                    self.model_name,
+                    attn_implementation="eager"
+                )
+                print("[Separator] ✅ AST Model loaded with eager attention")
+            except TypeError as e:
+                if "attn_implementation" in str(e):
+                    print("[Separator] 🔍 Trying without attn_implementation parameter...")
+                    # 구버전 transformers용
+                    self.ast_model = ASTForAudioClassification.from_pretrained(
+                        self.model_name
+                    )
+                    print("[Separator] ✅ AST Model loaded without attn_implementation")
+                else:
+                    raise e
             
             # 8. 디바이스로 이동
             print(f"[Separator] 🔍 Moving model to device: {self.device}")

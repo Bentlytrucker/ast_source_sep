@@ -206,7 +206,13 @@ class SoundSeparator:
         # Raspberry Pi 최적화 설정
         torch.set_num_threads(TORCH_NUM_THREADS)
         
+        print("[Separator] 🚀 Starting Sound Separator initialization...")
         self._initialize_model()
+        
+        if self.is_available:
+            print("[Separator] ✅ Sound Separator ready for use")
+        else:
+            print("[Separator] ❌ Sound Separator initialization failed - separation will be disabled")
     
     def _initialize_model(self):
         """AST 모델 초기화 (Raspberry Pi 최적화)"""

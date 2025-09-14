@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sound Separator Module
-- separator.py 기반으로 구현
+Sound Separator Module for Raspberry Pi
+- separator.py의 최신 로직을 기반으로 구현
+- Raspberry Pi 환경에 최적화
 - 각도 정보를 백엔드에 전달
 - 음원 분리 및 분류 기능
 """
@@ -20,7 +21,7 @@ from typing import List, Tuple, Optional, Dict, Any
 
 # separator.py에서 사용하는 모듈들 import
 warnings.filterwarnings("ignore")
-torch.set_num_threads(4)
+torch.set_num_threads(2)  # Raspberry Pi에 최적화
 
 try:
     from transformers import ASTFeatureExtractor, ASTForAudioClassification
@@ -30,79 +31,75 @@ except ImportError:
     ASTForAudioClassification = None
 
 # =========================
-# Config (separator.py와 동일)
+# Global Constants (separator.py 최신 버전)
 # =========================
 SR = 16000
 WIN_SEC = 4.096
 ANCHOR_SEC = 0.512
 L_FIXED = int(round(WIN_SEC * SR))
 
-NORMALIZE_TARGET_PEAK = 0.95
-RESIDUAL_CLIP_THR = 0.0005
+N_FFT, HOP, WINLEN = 400, 160, 400
+WINDOW = torch.hann_window(WINLEN)
+N_MELS = 128
+EPS = 1e-10
 
-USE_ADAPTIVE_STRATEGY = True
-FALLBACK_THRESHOLD = 0.1
+# Processing parameters
+SMOOTH_T = 19
+ALPHA_ATT = 0.80
+BETA_PUR = 1.20
+W_E = 0.30
+TOP_PCT_CORE_IN_ANCHOR = 0.50
 
+# Masking parameters
 MASK_SIGMOID_CENTER = 0.6
 MASK_SIGMOID_SLOPE = 20.0
 
-N_FFT, HOP, WINLEN = 400, 160, 400
-WINDOW = torch.hann_window(WINLEN)
-EPS = 1e-10
-
-N_MELS = 128
-
-SMOOTH_T = 19
-ALPHA_ATT = 0.60
-BETA_PUR = 1.50
-W_E = 0.40
-TOP_PCT_CORE_IN_ANCHOR = 0.50
-
-OMEGA_Q_CONSERVATIVE = 0.9
-OMEGA_Q_AGGRESSIVE = 0.7
-OMEGA_DIL = 2
+# Strategy parameters
+OMEGA_Q_CONSERVATIVE = 0.2
 OMEGA_MIN_BINS = 5
+AST_FREQ_QUANTILE_CONSERVATIVE = 0.4
 
-AST_FREQ_QUANTILE_CONSERVATIVE = 0.7
-AST_FREQ_QUANTILE_AGGRESSIVE = 0.4
+# Classification thresholds
+CONFIDENCE_THRESHOLD = 0.8
+PURITY_THRESHOLD = 0.7
+RESIDUAL_CONFIDENCE_THRESHOLD = 0.7
 
-DANGER_IDS = {0,396, 397, 398, 399, 400, 426, 436}
+# Processing limits
+MAX_PASSES = 3
+MIN_ERATIO = 0.001  # separator.py와 동일
+
+# Audio amplification parameters
+MIN_ANCHOR_ENERGY = 0.001
+AMPLIFICATION_FACTOR = 10.0
+MAX_AMPLIFICATION = 100.0
+
+# Sound classification mappings (separator.py 최신 버전)
+DANGER_IDS = {396, 397, 398, 399, 400, 426, 436}
 HELP_IDS = {23, 14, 354, 355, 356, 359}
 WARNING_IDS = {288, 364, 388, 389, 390, 439, 391, 392, 393, 395, 440, 441, 443, 456, 469, 470, 478, 479}
 
-PRES_Q = 0.20
-PRES_SMOOTH_T = 9
+# Raspberry Pi 최적화 설정
+# 메모리 사용량 최적화
+TORCH_NUM_THREADS = 2  # Raspberry Pi에 적합한 스레드 수
 
-USED_THRESHOLD = 0.65
-USED_DILATE_MS = 80
-ANCHOR_SUPPRESS_MS = 200
-ANCHOR_SUPPRESS_BASE = 0.6
+# 분리 강도 조정 (Raspberry Pi 최적화)
+MASK_THRESHOLD = 0.3        # Raspberry Pi에 적합한 임계값
+MASK_SOFTNESS = 0.1         # 부드러운 전환을 위한 범위
+USE_HARD_THRESHOLD = False  # 부드러운 threshold 사용
 
-MAX_PASSES = 3
-MIN_ERATIO = 0.005  # 더 약한 소리도 분리하도록 임계값 낮춤
-
-# 분리 강도 조정 (다중 소리 분리 개선)
-# Threshold 마스킹 설정
-MASK_THRESHOLD = 0.6        # 임계값 기반 마스킹 (0.3 이상이면 1, 미만이면 0)
-MASK_SOFTNESS = 0.1         # 부드러운 전환을 위한 범위 (threshold ± softness)
-USE_HARD_THRESHOLD = False  # True면 완전한 하드 threshold, False면 부드러운 threshold
-
-# 다양한 threshold 설정 (테스트용)
+# Raspberry Pi용 threshold 설정
 THRESHOLD_PRESETS = {
-    "conservative": 0.5,    # 보수적 분리 (높은 임계값)
-    "balanced": 0.3,        # 균형잡힌 분리
-    "aggressive": 0.2,      # 공격적 분리 (낮은 임계값)
+    "conservative": 0.4,    # 보수적 분리
+    "balanced": 0.3,        # 균형잡힌 분리 (기본값)
+    "aggressive": 0.2,      # 공격적 분리
     "very_aggressive": 0.1  # 매우 공격적 분리
 }
-CURRENT_THRESHOLD_PRESET = "balanced"  # 현재 사용할 preset
-ALPHA_ATT = 0.30            # 어텐션 가중치 (더 보수적인 분리)
-BETA_PUR = 0.8              # 순도 가중치 (더 보수적인 분리)
-W_E = 0.20                  # 에너지 가중치 (잔여물에 더 많은 에너지 보존)
+CURRENT_THRESHOLD_PRESET = "balanced"  # Raspberry Pi 기본값
 
-# 잔여물 증폭 설정
+# 잔여물 증폭 설정 (Raspberry Pi 최적화)
 RESIDUAL_AMPLIFY = True     # 잔여물 증폭 활성화
-RESIDUAL_GAIN = 2.0         # 잔여물 증폭 배수 (2배)
-RESIDUAL_MAX_GAIN = 4.0     # 최대 증폭 배수 (4배)
+RESIDUAL_GAIN = 1.5         # Raspberry Pi에 적합한 증폭 배수
+RESIDUAL_MAX_GAIN = 3.0     # 최대 증폭 배수 제한
 
 # Backend API
 USER_ID = 6
@@ -118,21 +115,25 @@ def ensure_odd(k: int) -> int:
     return k + 1 if (k % 2 == 0) else k
 
 def smooth1d(x: torch.Tensor, k: int) -> torch.Tensor:
-    if k <= 1: return x
+    if k <= 1:
+        return x
     ker = torch.ones(k, device=x.device) / k
     return F.conv1d(x.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1)
 
 def to_np(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
 
-def align_len_1d(x: torch.Tensor, T: int, device=None, mode="linear"):
-    if device is None: device = x.device
-    xv = x.to(device).view(1,1,-1).float()
-    if xv.size(-1) == T:
-        out = xv.view(-1)
+def align_len_1d(x: torch.Tensor, target_len: int, device: torch.device, mode: str = "linear") -> torch.Tensor:
+    """1D 텐서의 길이를 목표 길이에 맞춤 (separator.py 최신 버전)"""
+    if x.shape[0] == target_len:
+        return x
+    
+    if mode == "linear":
+        return F.interpolate(x.view(1, 1, -1), size=target_len, mode="linear", align_corners=False).view(-1)
+    elif mode == "nearest":
+        return F.interpolate(x.view(1, 1, -1), size=target_len, mode="nearest").view(-1)
     else:
-        out = F.interpolate(xv, size=T, mode=mode, align_corners=False).view(-1)
-    return out.clamp(0,1)
+        return F.interpolate(x.view(1, 1, -1), size=target_len, mode="linear", align_corners=False).view(-1)
 
 def soft_sigmoid(x: torch.Tensor, center: float, slope: float, min_val: float = 0.0) -> torch.Tensor:
     sig = torch.sigmoid(slope * (x - center))
@@ -169,7 +170,7 @@ def amplify_residual(residual: np.ndarray, gain: float = 2.0, max_gain: float = 
 
 class SoundSeparator:
     def __init__(self, model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
-                 device: str = "auto", backend_url: str = BACKEND_URL):
+                 device: str = "auto", backend_url: str = BACKEND_URL, led_controller=None):
         """
         Sound Separator 초기화
         
@@ -177,13 +178,17 @@ class SoundSeparator:
             model_name: AST 모델 이름
             device: 사용할 디바이스 (auto/cpu/cuda)
             backend_url: 백엔드 API URL
+            led_controller: LED 컨트롤러 인스턴스
         """
         self.model_name = model_name
         self.backend_url = backend_url
+        self.led_controller = led_controller
         
-        # Device 설정
+        # Device 설정 (Raspberry Pi 최적화)
         if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # Raspberry Pi에서는 CPU 사용
+            self.device = torch.device("cpu")
+            print("[Separator] Raspberry Pi detected - using CPU")
         else:
             self.device = torch.device(device)
         
@@ -192,16 +197,19 @@ class SoundSeparator:
         self.mel_fb_m2f = None
         self.is_available = False
         
-        # 분리 관련 캐시
+        # 분리 관련 캐시 (Raspberry Pi 최적화 - 메모리 제한)
         self.attention_cache = {}
         self.freq_attention_cache = {}
         self.cls_head_cache = {}
         self.spectrogram_cache = {}
         
+        # Raspberry Pi 최적화 설정
+        torch.set_num_threads(TORCH_NUM_THREADS)
+        
         self._initialize_model()
     
     def _initialize_model(self):
-        """AST 모델 초기화 (실전용)"""
+        """AST 모델 초기화 (Raspberry Pi 최적화)"""
         try:
             if ASTFeatureExtractor is None or ASTForAudioClassification is None:
                 print("[Separator] ❌ Transformers not available - 실전 모드에서는 필수입니다!")
@@ -210,16 +218,32 @@ class SoundSeparator:
             
             print(f"[Separator] Loading AST model: {self.model_name}")
             print(f"[Separator] Device: {self.device}")
+            print(f"[Separator] Threads: {TORCH_NUM_THREADS}")
+            
+            # Raspberry Pi 최적화: 메모리 사용량 제한
+            import gc
+            gc.collect()
             
             self.extractor = ASTFeatureExtractor.from_pretrained(self.model_name)
-            self.ast_model = ASTForAudioClassification.from_pretrained(self.model_name).to(self.device)
+            self.ast_model = ASTForAudioClassification.from_pretrained(
+                self.model_name,
+                attn_implementation="eager"  # Raspberry Pi 호환성
+            ).to(self.device)
             self.ast_model.eval()
             
-            # Mel filterbank 생성
-            self.mel_fb_m2f = torchaudio.transforms.MelScale(n_mels=N_MELS, sample_rate=SR, n_stft=N_FFT//2+1).fb
+            # Mel filterbank 생성 (Raspberry Pi 최적화)
+            fbins = N_FFT//2 + 1
+            mel_fb_f2m = torchaudio.functional.melscale_fbanks(
+                n_freqs=fbins, f_min=0.0, f_max=SR/2, n_mels=N_MELS,
+                sample_rate=SR, norm="slaney"
+            )
+            self.mel_fb_m2f = mel_fb_f2m.T.contiguous()
+            
+            # 메모리 정리
+            gc.collect()
             
             self.is_available = True
-            print("[Separator] ✅ AST model loaded successfully")
+            print("[Separator] ✅ AST model loaded successfully (Raspberry Pi optimized)")
             
         except Exception as e:
             print(f"[Separator] ❌ Model loading error: {e}")
@@ -687,13 +711,45 @@ class SoundSeparator:
             print(f"[Separator] Confidence: {confidence:.3f}")
             print(f"[Separator] Decibel: {db_mean:.1f} dB")
             
-            # 음원 분리 실행 (새로운 기능!)
+            # 음원 분리 실행 (separator.py 최신 버전)
             separated_sources = []
             separated_file = None
             if output_dir:
                 if self.is_available:
                     print(f"[Separator] Starting source separation...")
-                    separated_sources = self.separate_audio(audio_normalized, max_passes=MAX_PASSES)
+                    
+                    # 콜백 함수 정의 (각 패스 완료 시마다 백엔드 전송 + LED 제어)
+                    def on_pass_complete(source_info):
+                        """각 패스 완료 시마다 백엔드 전송 + LED 제어"""
+                        if source_info['sound_type'] != "other":
+                            print(f"[Separator] Sending separated source to backend: {source_info['class_name']} ({source_info['sound_type']})")
+                            backend_success = self._send_to_backend(
+                                source_info['sound_type'], 
+                                source_info['class_name'], 
+                                source_info.get('db_mean', db_mean), 
+                                angle
+                            )
+                            if backend_success:
+                                print(f"[Separator] ✅ Backend transmission successful for {source_info['class_name']}")
+                            else:
+                                print(f"[Separator] ❌ Backend transmission failed for {source_info['class_name']}")
+                            
+                            # LED 제어 (각도 기반)
+                            if self.led_controller:
+                                print(f"[Separator] Activating directional LED for {source_info['class_name']} at {angle}°")
+                                led_success = self.led_controller.activate_led(
+                                    angle, 
+                                    source_info['class_name'], 
+                                    source_info['sound_type']
+                                )
+                                if led_success:
+                                    print(f"[Separator] ✅ LED activated for {source_info['class_name']} at {angle}°")
+                                else:
+                                    print(f"[Separator] ❌ LED activation failed for {source_info['class_name']}")
+                            else:
+                                print(f"[Separator] No LED controller available for {source_info['class_name']}")
+                    
+                    separated_sources = self.separate_audio(audio_normalized, max_passes=MAX_PASSES, on_pass_complete=on_pass_complete)
                     
                     # 분리된 소리들을 파일로 저장
                     for i, source in enumerate(separated_sources):
@@ -715,12 +771,16 @@ class SoundSeparator:
                     # 분리 불가능한 경우 원본 데이터 저장
                     separated_file = self._save_separated_audio(audio_raw, class_name, sound_type, output_dir)
             
-            # 백엔드 전송 (other 타입 제외)
+            # 백엔드 전송 (other 타입 제외) - 분리된 소리들은 이미 전송됨
             backend_success = False
-            if sound_type != "other":
+            if sound_type != "other" and not separated_sources:
+                # 분리된 소리가 없는 경우에만 원본 분류 결과 전송
                 backend_success = self._send_to_backend(sound_type, class_name, db_mean, angle)
-            else:
+            elif sound_type == "other":
                 print(f"[Separator] Skipping backend send for 'other' type: {class_name}")
+                backend_success = True
+            else:
+                # 분리된 소리들이 이미 전송되었으므로 성공으로 처리
                 backend_success = True
             
             # 결과 반환
@@ -762,15 +822,18 @@ class SoundSeparator:
         """캐시 키 생성"""
         return str(hash(audio.tobytes()))
     
-    def _extract_and_cache_attention(self, audio: np.ndarray, T_out: int, F_out: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """AST 모델 호출하여 시간/주파수 attention map과 CLS features 추출 및 캐싱"""
+    def _extract_and_cache_attention(self, audio: np.ndarray, T_out: int, F_out: int, anchor_region: Optional[Tuple[int, int]] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str, str, int, float, List[Tuple[str, float, int]]]:
+        """AST 모델 호출하여 시간/주파수 attention map과 CLS features 추출 및 캐싱 (separator.py 최신 버전)"""
         cache_key = self._get_cache_key(audio)
         
         # 캐시 확인
         if cache_key in self.attention_cache and cache_key in self.cls_head_cache:
             freq_attn = self.freq_attention_cache.get(cache_key)
             if freq_attn is not None:
-                return self.attention_cache[cache_key], freq_attn, self.cls_head_cache[cache_key]
+                # 캐시된 분류 정보도 반환
+                cached_class_info = self.cls_head_cache.get(cache_key + "_class_info")
+                if cached_class_info:
+                    return self.attention_cache[cache_key], freq_attn, self.cls_head_cache[cache_key], *cached_class_info
         
         # int16 데이터를 float32로 변환
         if audio.dtype == np.int16:
@@ -786,13 +849,52 @@ class SoundSeparator:
         else:
             audio_padded = audio[:target_len]
         
-        feat = self.extractor(audio_padded, sampling_rate=SR, return_tensors="pt")
+        # 앵커 영역이 제공된 경우 해당 영역만 남기고 나머지는 0으로 설정
+        if anchor_region is not None:
+            anchor_start, anchor_end = anchor_region
+            # STFT 프레임을 오디오 샘플로 변환
+            frame_to_sample = HOP  # STFT hop length
+            audio_start = anchor_start * frame_to_sample
+            audio_end = anchor_end * frame_to_sample
+            
+            # 오디오 길이 내에서 클리핑
+            audio_start = max(0, min(audio_start, len(audio_padded)))
+            audio_end = max(0, min(audio_end, len(audio_padded)))
+            
+            # 앵커 영역만 남기고 나머지는 0으로 설정
+            audio_anchored = np.zeros_like(audio_padded)
+            audio_anchored[audio_start:audio_end] = audio_padded[audio_start:audio_end]
+            
+            print(f"  🎯 Using anchor-focused classification: frames {anchor_start}-{anchor_end} (samples {audio_start}-{audio_end})")
+            audio_for_classification = audio_anchored
+        else:
+            audio_for_classification = audio_padded
+        
+        feat = self.extractor(audio_for_classification, sampling_rate=SR, return_tensors="pt")
         
         # Mel 스펙트로그램 추출 (캐싱용)
         mel_spec = feat["input_values"].squeeze(0)  # [N_MELS, T]
         
         with torch.no_grad():
             outputs = self.ast_model(input_values=feat["input_values"].to(self.device), output_attentions=True, return_dict=True)
+        
+        # 분류 결과 추출
+        logits = outputs.logits
+        probabilities = torch.softmax(logits, dim=-1)
+        predicted_class_id = logits.argmax(dim=-1).item()
+        confidence = probabilities[0, predicted_class_id].item()
+        
+        class_name = self.ast_model.config.id2label[predicted_class_id]
+        sound_type = self._get_sound_type(predicted_class_id)
+        
+        # Top 5 클래스 추출
+        top5_probs, top5_indices = torch.topk(probabilities[0], 5)
+        top5_classes = []
+        for i in range(5):
+            class_id = top5_indices[i].item()
+            class_name_top5 = self.ast_model.config.id2label[class_id]
+            prob = top5_probs[i].item()
+            top5_classes.append((class_name_top5, prob, class_id))
         
         # Attention map 추출
         attns = outputs.attentions
@@ -816,14 +918,29 @@ class SoundSeparator:
             # 2D 맵으로 재구성
             full_map = cls_to_patches.reshape(Fp, Tp)  # [12, 101]
             
-            # 시간 어텐션 (주파수 차원으로 평균)
-            time_attn = full_map.mean(dim=0)  # [101]
-            time_attn_interp = F.interpolate(time_attn.view(1,1,-1), size=T_out, mode="linear", align_corners=False).view(-1)
-            time_attention = norm01(smooth1d(time_attn_interp, SMOOTH_T))
+            # 실제 오디오 길이에 해당하는 부분만 추출 (정확한 시간 매핑)
+            original_audio_duration = len(audio) / SR  # 실제 오디오 길이 (초)
+            target_duration = target_len / SR  # 패딩된 오디오 길이 (초)
+            original_audio_ratio = original_audio_duration / target_duration  # 정확한 비율
             
-            # 주파수 어텐션 (시간 차원으로 평균)
-            freq_attn = full_map.mean(dim=1)  # [12]
-            freq_attn_interp = F.interpolate(freq_attn.view(1,1,-1), size=F_out, mode="linear", align_corners=False).view(-1)
+            # AST 패치 구조: 101개 패치가 10초를 커버
+            time_patches_to_use = int(Tp * original_audio_ratio)  # 사용할 시간 패치 수
+            
+            print(f"  🔍 Audio duration: {original_audio_duration:.3f}s, Target: {target_duration:.3f}s, Ratio: {original_audio_ratio:.3f}")
+            print(f"  🔍 Using {time_patches_to_use}/{Tp} time patches for {original_audio_duration:.3f}s audio")
+            
+            # 실제 오디오에 해당하는 어텐션 맵만 추출
+            full_map_cropped = full_map[:, :time_patches_to_use]  # [12, time_patches_to_use]
+            
+            # 시간 어텐션 (주파수 차원으로 평균) - 크롭된 맵 사용
+            time_attn = full_map_cropped.mean(dim=0)  # [time_patches_to_use]
+            time_attn_interp = F.interpolate(time_attn.view(1,1,-1), size=T_out, mode="linear", align_corners=False).view(-1)
+            time_attn_smooth = smooth1d(time_attn_interp, SMOOTH_T)
+            time_attention = norm01(time_attn_smooth)
+            
+            # 주파수 어텐션 (시간 차원으로 평균) - 크롭된 맵 사용
+            freq_attn_mel = full_map_cropped.mean(dim=1)  # [12] - Mel 스케일
+            freq_attn_interp = F.interpolate(freq_attn_mel.view(1,1,-1), size=F_out, mode="linear", align_corners=False).view(-1)
             freq_attention = norm01(freq_attn_interp)
         
         # CLS features 추출
@@ -838,10 +955,14 @@ class SoundSeparator:
         self.cls_head_cache[cache_key] = cls_features
         self.spectrogram_cache[cache_key] = mel_spec.clone()
         
-        return time_attention, freq_attention, cls_features
+        # 분류 정보도 캐싱
+        class_info = (class_name, sound_type, predicted_class_id, confidence, top5_classes)
+        self.cls_head_cache[cache_key + "_class_info"] = class_info
+        
+        return time_attention, freq_attention, cls_features, class_name, sound_type, predicted_class_id, confidence, top5_classes
     
-    def _stft_all(self, audio: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """STFT 변환 및 Mel 스펙트로그램 생성"""
+    def _stft_all(self, audio: np.ndarray, mel_fb_m2f: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """STFT 변환 및 Mel 스펙트로그램 생성 (separator.py 최신 버전)"""
         # int16 데이터를 float32로 변환 (STFT 요구사항)
         if audio.dtype == np.int16:
             audio = audio.astype(np.float32) / 32767.0
@@ -855,10 +976,10 @@ class SoundSeparator:
         P = (mag * mag).clamp_min(EPS)
         phase = torch.angle(st)
 
-        if self.mel_fb_m2f.shape[0] != N_MELS:
-            mel_fb_m2f = self.mel_fb_m2f.T.contiguous()
+        if mel_fb_m2f.shape[0] != N_MELS:
+            mel_fb_m2f = mel_fb_m2f.T.contiguous()
         else:
-            mel_fb_m2f = self.mel_fb_m2f
+            mel_fb_m2f = mel_fb_m2f
         assert mel_fb_m2f.shape[0] == N_MELS and mel_fb_m2f.shape[1] == P.shape[0]
         mel_fb_m2f = mel_fb_m2f.to(P.dtype).to(P.device)
         mel_pow = (mel_fb_m2f @ P).clamp_min(EPS)
@@ -915,13 +1036,9 @@ class SoundSeparator:
         return anchor_s, anchor_e, core_s_rel, core_e_rel
     
     def _omega_support_with_ast_freq(self, Ablk: torch.Tensor, ast_freq_attn: torch.Tensor, strategy: str = "conservative") -> torch.Tensor:
-        """주파수 지원 영역 계산"""
-        if strategy == "conservative":
-            omega_q = OMEGA_Q_CONSERVATIVE
-            ast_freq_quantile = AST_FREQ_QUANTILE_CONSERVATIVE
-        else:
-            omega_q = OMEGA_Q_AGGRESSIVE
-            ast_freq_quantile = AST_FREQ_QUANTILE_AGGRESSIVE
+        """주파수 지원 영역 계산 (separator.py 최신 버전)"""
+        omega_q = OMEGA_Q_CONSERVATIVE
+        ast_freq_quantile = AST_FREQ_QUANTILE_CONSERVATIVE
         
         med = Ablk.median(dim=1).values
         th = torch.quantile(med, omega_q)
@@ -932,7 +1049,8 @@ class SoundSeparator:
         
         mask = torch.maximum(mask_energy, mask_ast_freq)
         
-        for _ in range(OMEGA_DIL):
+        # Dilation (2 iterations)
+        for _ in range(2):
             mask = torch.maximum(mask, torch.roll(mask, 1))
             mask = torch.maximum(mask, torch.roll(mask, -1))
         
@@ -945,7 +1063,7 @@ class SoundSeparator:
         return mask
     
     def _template_from_anchor_block(self, Ablk: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-        """앵커 블록에서 템플릿 생성"""
+        """앵커 블록에서 템플릿 생성 (separator.py 최신 버전)"""
         om = omega.view(-1,1)
         w = (Ablk * om).mean(dim=1) * omega
         w = w / (w.sum() + EPS)
@@ -954,16 +1072,16 @@ class SoundSeparator:
         return w
     
     def _presence_from_energy(self, Xmel: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-        """에너지 기반 존재감 계산"""
+        """에너지 기반 존재감 계산 (separator.py 최신 버전)"""
         om = omega.view(-1,1)
         e_omega = (Xmel * om).sum(dim=0)
-        e_omega = smooth1d(e_omega, PRES_SMOOTH_T)
-        thr = torch.quantile(e_omega, PRES_Q)
+        e_omega = smooth1d(e_omega, 9)  # PRES_SMOOTH_T = 9
+        thr = torch.quantile(e_omega, 0.20)  # PRES_Q = 0.20
         thr = torch.clamp(thr, min=1e-10)
         return (e_omega > thr).float()
     
     def _amplitude_raw(self, Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor) -> torch.Tensor:
-        """원시 진폭 계산"""
+        """원시 진폭 계산 (separator.py 최신 버전)"""
         om = omega.view(-1,1)
         Xo = Xmel * om
         denom = (w_bar*w_bar).sum() + EPS
@@ -971,7 +1089,7 @@ class SoundSeparator:
         return a_raw.clamp_min(0.0)
     
     def _cos_similarity_over_omega(self, Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, g_pres: torch.Tensor):
-        """오메가 영역에서 코사인 유사도 계산"""
+        """오메가 영역에서 코사인 유사도 계산 (separator.py 최신 버전)"""
         om = omega.view(-1,1)
         Xo = Xmel * om
         wn = (w_bar * omega); wn = wn / (wn.norm(p=2) + 1e-8)
@@ -979,9 +1097,59 @@ class SoundSeparator:
         cos_raw = (wn.view(-1,1) * Xn).sum(dim=0).clamp(0,1)
         return cos_raw * g_pres
     
+    def _purity_from_P(self, P: torch.Tensor) -> torch.Tensor:
+        """순수도 계산 (separator.py 최신 버전)"""
+        fbins, T = P.shape
+        e = P.sum(dim=0); e_n = e / (e.max() + EPS)
+        p = P / (P.sum(dim=0, keepdim=True) + EPS)
+        H = -(p * (p + EPS).log()).sum(dim=0)
+        Hn = H / np.log(max(2, fbins))
+        pur = W_E * e_n + (1.0 - W_E) * (1.0 - Hn)
+        return norm01(smooth1d(pur, SMOOTH_T))
+    
+    def _anchor_score(self, A_t: torch.Tensor, Pur: torch.Tensor) -> torch.Tensor:
+        """앵커 스코어 계산 (separator.py 최신 버전)"""
+        return norm01(smooth1d((A_t.clamp(0,1)**ALPHA_ATT) * (Pur.clamp(0,1)**BETA_PUR), SMOOTH_T))
+    
+    def _pick_anchor_region(self, score: torch.Tensor, La: int, core_pct: float, P: torch.Tensor) -> Tuple[int, int, int, int]:
+        """앵커 영역 선택 (separator.py 최신 버전)"""
+        T = score.numel()
+        
+        # 전체 스펙트로그램의 에너지 계산
+        total_energy = P.sum(dim=0)  # [T]
+        energy_threshold = torch.quantile(total_energy, 0.1)  # 하위 10% 에너지 임계값
+        
+        # 에너지가 너무 낮은 구간은 앵커 후보에서 제외
+        valid_regions = total_energy > energy_threshold
+        
+        # 유효한 구간에서만 앵커 선택
+        if valid_regions.sum() == 0:
+            peak_idx = int(torch.argmax(score).item())
+        else:
+            valid_score = score.clone()
+            valid_score[~valid_regions] = -float('inf')
+            peak_idx = int(torch.argmax(valid_score).item())
+        
+        anchor_s = max(0, min(peak_idx - (La // 2), T - La))
+        anchor_e = anchor_s + La
+        local_score = score[anchor_s:anchor_e]
+        peak_idx_rel = int(torch.argmax(local_score).item())
+        threshold = torch.quantile(local_score, core_pct)
+        
+        core_s_rel = peak_idx_rel
+        while core_s_rel > 0 and local_score[core_s_rel - 1] >= threshold:
+            core_s_rel -= 1
+            
+        core_e_rel = peak_idx_rel
+        while core_e_rel < La - 1 and local_score[core_e_rel + 1] >= threshold:
+            core_e_rel += 1
+        
+        core_e_rel += 1
+        return anchor_s, anchor_e, core_s_rel, core_e_rel
+    
     def _unified_masking_strategy(self, Xmel: torch.Tensor, w_bar: torch.Tensor, omega: torch.Tensor, 
                                  ast_freq_attn: torch.Tensor, P: torch.Tensor, s: int, e: int, strategy: str = "conservative") -> torch.Tensor:
-        """통합 마스킹 전략"""
+        """통합 마스킹 전략 (separator.py 최신 버전)"""
         fbins, T = P.shape
         
         # Calculate cosΩ, the core of our mask
@@ -1029,11 +1197,10 @@ class SoundSeparator:
             soft_time_mask = torch.clamp(mask_input, 0.0, 1.0)
             mask_type = "SOFT"
         
-        # 디버그 정보 출력
+        # 디버그 정보 출력 (Raspberry Pi 최적화 - 간소화)
         mask_mean = soft_time_mask.mean().item()
-        mask_std = soft_time_mask.std().item()
         cos_squared_mean = cos_squared.mean().item()
-        print(f"[Separator] {mask_type} threshold masking ({CURRENT_THRESHOLD_PRESET}) - Threshold: {threshold:.3f}, Cos² mean: {cos_squared_mean:.3f}, Mask mean: {mask_mean:.3f}±{mask_std:.3f}")
+        print(f"[Separator] {mask_type} masking ({CURRENT_THRESHOLD_PRESET}) - Threshold: {threshold:.3f}, Cos² mean: {cos_squared_mean:.3f}, Mask mean: {mask_mean:.3f}")
         
         # 앵커 영역의 진폭 주파수 선택
         anchor_max_amp = anchor_spec.max(dim=1).values
@@ -1069,11 +1236,11 @@ class SoundSeparator:
         
         freq_boost_mask = torch.maximum(high_amp_mask_lin, ast_active_mask_lin)
         
-        # 가중치 적용
+        # 가중치 적용 (Raspberry Pi 최적화 - 단순화)
         if is_weak_sound:
-            freq_weight = 1.0 + 0.8 * freq_boost_mask
+            freq_weight = 1.0 + 0.6 * freq_boost_mask  # 감소된 가중치
         else:
-            freq_weight = 1.0 + 0.6 * freq_boost_mask
+            freq_weight = 1.0 + 0.4 * freq_boost_mask  # 감소된 가중치
         
         # 기본 마스크 계산
         M_base = omega_lin.view(-1, 1) * soft_time_mask.view(1, -1)
@@ -1091,64 +1258,117 @@ class SoundSeparator:
         
         M_lin = torch.minimum(M_weighted, spec_magnitude)
         
-        # 마스크 강도 조정
+        # 마스크 강도 조정 (Raspberry Pi 최적화)
         if is_weak_sound:
-            M_lin = torch.minimum(M_lin, spec_magnitude * 0.95)
+            M_lin = torch.minimum(M_lin, spec_magnitude * 0.9)  # 더 보수적
         else:
-            M_lin = torch.minimum(M_lin, spec_magnitude * 0.8)
+            M_lin = torch.minimum(M_lin, spec_magnitude * 0.7)  # 더 보수적
         
         return M_lin
     
-    def _single_pass_separation(self, audio: np.ndarray, used_mask_prev: Optional[torch.Tensor],
-                               prev_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor]],
-                               pass_idx: int) -> Tuple[np.ndarray, np.ndarray, float, Optional[torch.Tensor], Dict[str, Any]]:
-        """단일 패스 분리"""
+    def _single_pass_separation(self, audio: np.ndarray, mel_fb_m2f: torch.Tensor, used_mask_prev: Optional[torch.Tensor],
+                               prev_anchors: List[Tuple[float,float,torch.Tensor,torch.Tensor,torch.Tensor]],
+                               pass_idx: int, prev_energy_ratio: float = 1.0,
+                               separated_time_regions: List[dict] = None,
+                               previous_anchors: List[Tuple[int, int]] = None) -> Tuple[np.ndarray, np.ndarray, float, Optional[torch.Tensor], Dict[str, Any]]:
+        """단일 패스 분리 (separator.py 최신 버전)"""
         t0 = time.time()
-        st, mag, P, phase, Xmel = self._stft_all(audio)
+        
+        # 1. 전체 오디오 에너지 체크 및 증폭
+        overall_energy = np.mean(audio**2)
+        amplification_factor = 1.0
+        
+        if overall_energy < MIN_ANCHOR_ENERGY:
+            # 전체 오디오가 작으면 증폭
+            energy_ratio = MIN_ANCHOR_ENERGY / (overall_energy + 1e-8)
+            amplification_factor = min(AMPLIFICATION_FACTOR * np.sqrt(energy_ratio), MAX_AMPLIFICATION)
+            
+            print(f"  🔊 Overall audio energy too low ({overall_energy:.6f}), amplifying by factor: {amplification_factor:.1f}")
+            audio = audio * amplification_factor
+            
+            # 클리핑 방지
+            max_val = np.max(np.abs(audio))
+            if max_val > 1.0:
+                audio = audio / max_val
+                print(f"  ⚠️ Clipping prevented, scaled by {1.0/max_val:.3f}")
+        
+        # 2. 증폭된 오디오로 STFT 계산
+        st, mag, P, phase, Xmel = self._stft_all(audio, mel_fb_m2f)
         fbins, T = P.shape
         La = int(round(ANCHOR_SEC * SR / HOP))
 
-        # 캐싱된 attention map 사용
-        time_attention, ast_freq_attn, _ = self._extract_and_cache_attention(audio, T, N_MELS)
+        # 이전에 분리된 시간대의 에너지 억제 (AST 추론 전에 적용)
+        audio_for_ast = audio  # AST용 오디오 (기본값: 원본)
+        if separated_time_regions and len(separated_time_regions) > 0:
+            print(f"  🔇 Suppressing energy in {len(separated_time_regions)} previously separated time regions")
+            for region in separated_time_regions:
+                time_mask = region['time_mask']
+                class_name_prev = region['class_name']
+                confidence_prev = region['confidence']
+                
+                # 시간 마스크 크기 조정
+                if time_mask.shape[0] != T:
+                    time_mask = align_len_1d(time_mask, T, device=P.device, mode="linear")
+                
+                # 에너지 억제 (0.1%만 남기기) - 훨씬 더 강한 억제
+                suppression_factor = 0.999  # 99.9% 억제하여 0.1%만 남김
+                P_suppressed = P * (1.0 - time_mask * suppression_factor)
+                P = P_suppressed
+
+        # 3. AST attention 추출 (앵커 영역 없이)
+        time_attention, ast_freq_attn, _, class_name, sound_type, class_id, confidence, top5_classes = self._extract_and_cache_attention(audio_for_ast, T, N_MELS)
         
         A_t = time_attention
         Pur = self._purity_from_P(P)
         Sc = self._anchor_score(A_t, Pur)
 
-        # Suppress used frames
+        # 4. 이전에 사용된 프레임 억제
         if used_mask_prev is not None:
             um = align_len_1d(used_mask_prev, T, device=Sc.device, mode="linear")
-            k = int(round((USED_DILATE_MS/1000.0)*SR/HOP)); k = ensure_odd(max(1,k))
+            k = int(round((80/1000.0)*SR/HOP)); k = ensure_odd(max(1,k))  # 80ms dilation
             ker = torch.ones(k, device=Sc.device)/k
             um = (F.conv1d(um.view(1,1,-1), ker.view(1,1,-1), padding=k//2).view(-1) > 0.2).float()
             Sc = Sc * (1 - 0.85 * um)
 
-        # Enhanced suppression of previous anchors
-        for (sa, ea, prev_w, prev_omega) in prev_anchors:
+        # 5. 이전 앵커들의 강화된 억제
+        for (sa, ea, prev_w, prev_omega, prev_anchor_score) in prev_anchors:
             ca = int(((sa+ea)/2) * SR / HOP)
             ca = max(0, min(T-1, ca))
-            sigma = int(round((ANCHOR_SUPPRESS_MS/1000.0)*SR/HOP))
+            sigma = int(round((200/1000.0)*SR/HOP))  # 200ms suppression
             idx = torch.arange(T, device=Sc.device) - ca
-            Sc = Sc * (1 - ANCHOR_SUPPRESS_BASE * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
+            Sc = Sc * (1 - 0.6 * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
             core_s = max(0, ca - La//2); core_e = min(T, ca + La//2)
             Sc[core_s:core_e] *= 0.2
         
-        # Pick anchor and core regions
+        # 6. 앵커 영역 선택
         s, e, core_s_rel, core_e_rel = self._pick_anchor_region(Sc, La, TOP_PCT_CORE_IN_ANCHOR, P)
         
-        # Create anchor block
+        # 7. 앵커 블록 생성
         Ablk = Xmel[:, s:e].clone()
         if core_s_rel > 0:  Ablk[:, :core_s_rel] = 0
         if core_e_rel < La: Ablk[:, core_e_rel:] = 0
 
-        # Ω 계산
+        # 8. Ω 계산
         omega = self._omega_support_with_ast_freq(Ablk, ast_freq_attn, "conservative")
         w_bar = self._template_from_anchor_block(Ablk, omega)
         
-        # 통합 마스킹 전략 적용
+        # 9. 앵커 영역 기반 분류 (더 정확한 분류)
+        anchor_region = (s, e)
+        _, _, _, class_name_anchor, sound_type_anchor, class_id_anchor, confidence_anchor, top5_classes_anchor = self._extract_and_cache_attention(audio_for_ast, T, N_MELS, anchor_region)
+        
+        # 앵커 기반 분류가 더 높은 신뢰도를 가지면 사용
+        if confidence_anchor > confidence:
+            class_name = class_name_anchor
+            sound_type = sound_type_anchor
+            class_id = class_id_anchor
+            confidence = confidence_anchor
+            top5_classes = top5_classes_anchor
+            print(f"  🎯 Using anchor-based classification: {class_name} (Conf: {confidence:.3f})")
+        
+        # 10. 통합 마스킹 전략 적용
         M_lin = self._unified_masking_strategy(Xmel, w_bar, omega, ast_freq_attn, P, s, e, "conservative")
         
-        # Subtraction in the complex STFT domain
+        # 11. STFT 도메인에서 분리
         stft_full = st
         
         # 마스크 적용
@@ -1168,13 +1388,12 @@ class SoundSeparator:
         mag_residual_linear = torch.maximum(mag_residual_linear, torch.zeros_like(mag_residual_linear))
         stft_res = mag_residual_linear * torch.exp(1j * phase)
         
-        # 에너지 검증
+        # 12. 에너지 검증 및 정규화
         src_energy = torch.sum(torch.abs(stft_src)**2).item()
         res_energy = torch.sum(torch.abs(stft_res)**2).item()
         orig_energy = torch.sum(torch.abs(stft_full)**2).item()
         total_energy = src_energy + res_energy
         
-        # 에너지 보존 검증 및 정규화
         energy_ratio = total_energy / (orig_energy + 1e-8)
         if energy_ratio > 1.05:
             scale_factor = orig_energy / (total_energy + 1e-8)
@@ -1187,7 +1406,7 @@ class SoundSeparator:
             stft_src = stft_src * torch.sqrt(scale_tensor)
             stft_res = stft_res * torch.sqrt(scale_tensor)
 
-        # Reconstruct both source and residual
+        # 13. 시간 도메인으로 재구성
         if stft_src.shape[0] != N_FFT//2 + 1:
             target_freq = N_FFT//2 + 1
             if stft_src.shape[0] < target_freq:
@@ -1203,77 +1422,81 @@ class SoundSeparator:
         res = torch.istft(stft_res, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN, 
                           window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
 
-        # ER calculation
+        # 14. ER 계산
         e_src = float(np.sum(src_amp**2)); e_res = float(np.sum(res**2))
         er = e_src / (e_src + e_res + 1e-12)
 
-        # 분류 및 순수도 계산
-        cache_key = self._get_cache_key(audio)
-        cls_features = self.cls_head_cache.get(cache_key)
-        
-        if cls_features is not None:
-            if cls_features.shape[-1] == self.ast_model.config.num_labels:
-                logits = cls_features
-            else:
-                logits = self.ast_model.classifier(cls_features)
-            
-            probabilities = torch.softmax(logits, dim=-1)
-            predicted_class_id = logits.argmax(dim=-1).item()
-            confidence = probabilities[0, predicted_class_id].item()
-            
-            class_name = self.ast_model.config.id2label[predicted_class_id]
-            sound_type = self._get_sound_type(predicted_class_id)
-        else:
-            class_name, sound_type, predicted_class_id, confidence = "Unknown", "other", 0, 0.0
-
-        # Used-frame mask for next pass
+        # 15. 시간 마스크 생성 (다음 패스용)
         if M_lin.shape[0] != P.shape[0]:
             min_freq = min(M_lin.shape[0], P.shape[0])
             M_lin = M_lin[:min_freq, :]
             P = P[:min_freq, :]
         
         r_t = (M_lin * P).sum(dim=0) / (P.sum(dim=0) + 1e-8)
-        used_mask = (r_t >= USED_THRESHOLD).float()
+        used_mask = (r_t >= 0.65).float()  # USED_THRESHOLD
+        
+        # 16. 시간 마스크 인덱스 추출
+        src_time_indices = torch.where(used_mask > 0.5)[0]
+        src_time_mask = used_mask
+
+        # 17. dB 계산
+        db_min, db_max, db_mean = self._calculate_decibel_simple(src_amp)
 
         elapsed = time.time() - t0
         
         info = {
+            "src_amp": src_amp,
+            "res": res,
             "er": er,
-            "elapsed": elapsed,
-            "anchor": (s*HOP/SR, e*HOP/SR),
-            "core": ((s+core_s_rel)*HOP/SR, (s+core_e_rel)*HOP/SR),
-            "quality": float(M_lin.mean().item()),
-            "w_bar": w_bar,
-            "omega": omega,
-            "stopped": False,
-            "energy_ratio": energy_ratio,
             "class_name": class_name,
-                "sound_type": sound_type,
-            "class_id": predicted_class_id,
-            "confidence": confidence
+            "sound_type": sound_type,
+            "class_id": class_id,
+            "confidence": confidence,
+            "elapsed": elapsed,
+            "separation_skipped": False,
+            "src_time_mask": src_time_mask,
+            "src_time_indices": src_time_indices,
+            "anchor_region": (s, e),  # 앵커 구간 정보 추가
+            "anchor_score": Sc,  # 현재 패스의 anchor score 추가
+            "db_min": db_min,
+            "db_max": db_max,
+            "db_mean": db_mean,
+            "amplification_factor": amplification_factor
         }
         
         return src_amp, res, er, used_mask, info
     
     def separate_audio(self, audio: np.ndarray, max_passes: int = MAX_PASSES, on_pass_complete=None) -> List[Dict[str, Any]]:
-        """오디오 분리 실행 (각 패스마다 즉시 처리)"""
+        """오디오 분리 실행 (separator.py 최신 버전)"""
         if not self.is_available:
             print("[Separator] ❌ Model not available for separation")
             return []
         
         print(f"[Separator] Starting audio separation with {max_passes} passes...")
         
+        # Mel filterbank 생성
+        fbins = N_FFT//2 + 1
+        mel_fb_f2m = torchaudio.functional.melscale_fbanks(
+            n_freqs=fbins, f_min=0.0, f_max=SR/2, n_mels=N_MELS,
+            sample_rate=SR, norm="slaney"
+        )
+        mel_fb_m2f = mel_fb_f2m.T.contiguous()
+        
         current_audio = audio.copy()
         used_mask_prev = None
         prev_anchors = []
         sources = []
+        prev_energy_ratio = 1.0
+        separated_time_regions = []  # 이전에 분리된 시간대 정보 저장
+        previous_anchors = []  # 이전 패스에서 사용된 앵커 구간 정보
         
         for pass_idx in range(max_passes):
             print(f"[Separator] --- Pass {pass_idx + 1} ---")
             
             # 분리 실행
             src_amp, res, er, used_mask, info = self._single_pass_separation(
-                current_audio, used_mask_prev, prev_anchors, pass_idx
+                current_audio, mel_fb_m2f, used_mask_prev, prev_anchors, pass_idx, prev_energy_ratio,
+                separated_time_regions, previous_anchors
             )
             
             # 분리 결과 디버깅
@@ -1281,6 +1504,7 @@ class SoundSeparator:
                 src_rms = np.sqrt(np.mean(src_amp ** 2))
                 res_rms = np.sqrt(np.mean(res ** 2))
                 print(f"[Separator] Pass {pass_idx + 1} - Source RMS: {src_rms:.6f}, Residual RMS: {res_rms:.6f}, Energy ratio: {er:.6f}")
+                print(f"[Separator] Pass {pass_idx + 1} - Class: {info['class_name']} ({info['sound_type']}), Confidence: {info['confidence']:.3f}")
             else:
                 print(f"[Separator] Pass {pass_idx + 1} - Source is None!")
             
@@ -1291,17 +1515,35 @@ class SoundSeparator:
                 "sound_type": info['sound_type'],
                 "confidence": info['confidence'],
                 "energy_ratio": er,
-                "anchor": info['anchor'],
-                "audio": src_amp
+                "anchor": info['anchor_region'],
+                "audio": src_amp,
+                "db_mean": info['db_mean'],
+                "amplification_factor": info.get('amplification_factor', 1.0)
             }
             sources.append(source_info)
-            
-            # 각 패스 완료 즉시 처리 (백엔드 전송, LED 출력)
-            # 출력 간소화 - 콜백에서 처리
             
             # 콜백 함수 호출 (각 패스 완료 시마다)
             if on_pass_complete:
                 on_pass_complete(source_info)
+            
+            # 분리된 시간대 정보 수집
+            if not info.get("separation_skipped", False):
+                separated_time_regions.append({
+                    'time_mask': info['src_time_mask'],
+                    'class_name': info['class_name'],
+                    'confidence': info['confidence'],
+                    'pass_idx': pass_idx
+                })
+                
+                # 앵커 구간 정보 수집
+                if 'anchor_region' in info and 'anchor_score' in info:
+                    prev_anchors.append((
+                        info['anchor_region'][0],  # prev_s
+                        info['anchor_region'][1],  # prev_e
+                        info['src_time_mask'],     # prev_mask
+                        torch.ones_like(info['src_time_mask']),  # prev_weight (기본값)
+                        info['anchor_score']       # prev_anchor_score
+                    ))
             
             # 잔여물을 다음 패스의 입력으로 사용 (증폭 적용)
             if RESIDUAL_AMPLIFY and pass_idx < max_passes - 1:  # 마지막 패스가 아닌 경우만
@@ -1312,14 +1554,48 @@ class SoundSeparator:
                 current_audio = res
             
             used_mask_prev = used_mask
-            
-            # 앵커 정보 저장
-            prev_anchors.append((info['anchor'][0], info['anchor'][1], info['w_bar'], info['omega']))
+            prev_energy_ratio = er
             
             # 조기 종료 조건
-            if er < MIN_ERATIO:
-                print(f"[Separator] Early stop: Energy ratio {er:.3f} < {MIN_ERATIO}")
+            residual_energy = float(np.sum(res**2))
+            if er < MIN_ERATIO and residual_energy < 0.001:  # 잔여물 에너지도 낮을 때만 종료
+                print(f"[Separator] Early stop: Energy ratio {er:.3f} < {MIN_ERATIO} and residual energy {residual_energy:.6f} too low")
                 break
+            elif er < MIN_ERATIO:
+                print(f"[Separator] Energy ratio {er:.3f} < {MIN_ERATIO}, but residual energy {residual_energy:.6f} is sufficient, continuing...")
+        
+        # 최종 잔여물 분류
+        if len(current_audio) > 0 and np.max(np.abs(current_audio)) > 1e-6:
+            print(f"[Separator] --- Final Residual Classification ---")
+            # 간단한 분류 (캐시된 정보 사용)
+            cache_key = self._get_cache_key(current_audio)
+            cached_class_info = self.cls_head_cache.get(cache_key + "_class_info")
+            
+            if cached_class_info:
+                class_name, sound_type, class_id, confidence, top5_classes = cached_class_info
+            else:
+                # 새로운 분류 수행
+                _, _, _, class_name, sound_type, class_id, confidence, top5_classes = self._extract_and_cache_attention(current_audio, 100, N_MELS)
+            
+            print(f"[Separator] Residual: {class_name} ({sound_type}) - Confidence: {confidence:.3f}")
+            
+            if confidence >= RESIDUAL_CONFIDENCE_THRESHOLD:
+                print(f"[Separator] High confidence residual detected, saving as sound...")
+                residual_info = {
+                    "pass": len(sources) + 1,
+                    "class_name": class_name,
+                    "sound_type": sound_type,
+                    "confidence": confidence,
+                    "energy_ratio": 0.0,
+                    "anchor": (0, 0),
+                    "audio": current_audio,
+                    "db_mean": self._calculate_decibel_simple(current_audio)[2],
+                    "amplification_factor": 1.0
+                }
+                sources.append(residual_info)
+                
+                if on_pass_complete:
+                    on_pass_complete(residual_info)
         
         print(f"[Separator] Separation completed. Found {len(sources)} sources.")
         return sources
@@ -1329,12 +1605,20 @@ class SoundSeparator:
         return self.is_available
     
     def cleanup(self):
-        """리소스 정리"""
+        """리소스 정리 (Raspberry Pi 최적화)"""
         # 캐시 정리
         self.attention_cache.clear()
         self.freq_attention_cache.clear()
         self.cls_head_cache.clear()
         self.spectrogram_cache.clear()
+        
+        # 메모리 정리
+        import gc
+        gc.collect()
+        
+        # GPU 메모리 정리 (만약 GPU를 사용했다면)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     def __enter__(self):
         return self
@@ -1346,7 +1630,7 @@ class SoundSeparator:
 
 
 def create_sound_separator(model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593", 
-                          device: str = "auto", backend_url: str = BACKEND_URL) -> SoundSeparator:
+                          device: str = "auto", backend_url: str = BACKEND_URL, led_controller=None) -> SoundSeparator:
     """
     Sound Separator 인스턴스 생성 (실전용)
     
@@ -1354,11 +1638,12 @@ def create_sound_separator(model_name: str = "MIT/ast-finetuned-audioset-10-10-0
         model_name: AST 모델 이름
         device: 사용할 디바이스
         backend_url: 백엔드 API URL
+        led_controller: LED 컨트롤러 인스턴스
         
     Returns:
         SoundSeparator 인스턴스
     """
-    return SoundSeparator(model_name, device, backend_url)
+    return SoundSeparator(model_name, device, backend_url, led_controller)
 
 
 def main():

@@ -233,10 +233,10 @@ class LEDController:
     
     def activate_led(self, angle: int, class_name: str, sound_type: str) -> bool:
         """
-        각도와 소리 정보에 따라 LED 활성화
+        각도와 소리 정보에 따라 LED 활성화 (각도 기반)
         
         Args:
-            angle: 소리 방향 각도
+            angle: 소리 방향 각도 (0-359)
             class_name: 분류된 소리 클래스명
             sound_type: 소리 타입 (danger/warning/help/other)
             
@@ -248,16 +248,132 @@ class LEDController:
             return False
         
         try:
-            # danger 타입인 경우 10초간 깜빡임
-            if sound_type == "danger":
-                print(f"[LED] DANGER detected: {class_name} at {angle}° - activating red LED with blinking")
-                return self.blink_sound_type(sound_type, blink_count=10, blink_duration=1.0)
+            # danger, warning, help 타입만 각도 기반 LED 제어
+            if sound_type in ["danger", "warning", "help"]:
+                print(f"[LED] {sound_type.upper()} detected: {class_name} at {angle}° - activating directional LED")
+                return self.set_directional_led(angle, sound_type, class_name)
             else:
-                print(f"[LED] {sound_type.upper()} detected: {class_name} at {angle}° - activating LED")
+                print(f"[LED] {sound_type.upper()} detected: {class_name} - using default LED")
                 return self.set_sound_type_color(sound_type, duration=5.0)
             
         except Exception as e:
             print(f"[LED] Error activating LED: {e}")
+            return False
+    
+    def set_directional_led(self, angle: int, sound_type: str, class_name: str) -> bool:
+        """
+        각도 기반 방향성 LED 제어 (가장 가까운 LED + 양옆 LED)
+        
+        Args:
+            angle: 소리 방향 각도 (0-359)
+            sound_type: 소리 타입 (danger/warning/help)
+            class_name: 분류된 소리 클래스명
+            
+        Returns:
+            설정 성공 여부
+        """
+        if not self.is_available or not self.pixel_ring:
+            print(f"[LED] Device not available, cannot set directional LED")
+            return False
+        
+        try:
+            # 12개 LED 중 가장 가까운 LED 인덱스 계산
+            led_index = self._angle_to_led_index(angle)
+            
+            # 양옆 LED 인덱스 계산
+            left_led = (led_index - 1) % 12
+            right_led = (led_index + 1) % 12
+            
+            # 색상 가져오기
+            color = LED_COLORS.get(sound_type, LED_COLORS["default"])
+            
+            # RGB 값 추출
+            r = (color >> 16) & 0xFF
+            g = (color >> 8) & 0xFF
+            b = color & 0xFF
+            
+            print(f"[LED] Directional LED: angle {angle}° -> LED {led_index} (left: {left_led}, right: {right_led})")
+            print(f"[LED] Color: {sound_type} (R:{r:02X}, G:{g:02X}, B:{b:02X})")
+            
+            # 12개 LED 배열 생성 (모두 꺼진 상태)
+            led_colors = [0, 0, 0, 0] * 12  # [r, g, b, 0] * 12
+            
+            # 선택된 3개 LED만 색상 설정
+            for led_idx in [left_led, led_index, right_led]:
+                led_colors[led_idx * 4] = r      # Red
+                led_colors[led_idx * 4 + 1] = g  # Green
+                led_colors[led_idx * 4 + 2] = b  # Blue
+                led_colors[led_idx * 4 + 3] = 0  # Reserved
+            
+            # Custom mode로 LED 설정 (Command 6)
+            self.pixel_ring.customize(led_colors)
+            
+            # danger 타입인 경우 깜빡임 효과
+            if sound_type == "danger":
+                return self._blink_directional_led(led_colors, blink_count=10, blink_duration=1.0)
+            else:
+                # 5초 후 자동으로 끄기
+                import threading
+                def turn_off_after_delay():
+                    time.sleep(5.0)
+                    self.turn_off()
+                
+                threading.Thread(target=turn_off_after_delay, daemon=True).start()
+                return True
+            
+        except Exception as e:
+            print(f"[LED] Error setting directional LED: {e}")
+            return False
+    
+    def _angle_to_led_index(self, angle: int) -> int:
+        """
+        각도를 LED 인덱스로 변환 (0-11)
+        
+        Args:
+            angle: 각도 (0-359)
+            
+        Returns:
+            LED 인덱스 (0-11)
+        """
+        # 각도를 0-359 범위로 정규화
+        angle = angle % 360
+        
+        # 12개 LED로 나누어 인덱스 계산 (30도씩)
+        led_index = int(round(angle / 30.0)) % 12
+        
+        return led_index
+    
+    def _blink_directional_led(self, led_colors: list, blink_count: int = 10, blink_duration: float = 1.0) -> bool:
+        """
+        방향성 LED 깜빡이기
+        
+        Args:
+            led_colors: LED 색상 배열
+            blink_count: 깜빡임 횟수
+            blink_duration: 깜빡임 간격 (초)
+            
+        Returns:
+            설정 성공 여부
+        """
+        if not self.is_available or not self.pixel_ring:
+            return False
+        
+        try:
+            for i in range(blink_count):
+                # LED 켜기
+                self.pixel_ring.customize(led_colors)
+                time.sleep(blink_duration)
+                
+                # LED 끄기
+                self.turn_off()
+                if i < blink_count - 1:  # 마지막이 아니면
+                    time.sleep(blink_duration)
+            
+            print(f"[LED] Directional LED blinked {blink_count} times")
+            return True
+            
+        except Exception as e:
+            print(f"[LED] Error blinking directional LED: {e}")
             return False
     
     def turn_off(self) -> bool:
@@ -375,15 +491,60 @@ class MockLEDController:
         return True
     
     def activate_led(self, angle: int, class_name: str, sound_type: str) -> bool:
-        """Mock LED 활성화"""
+        """Mock LED 활성화 (각도 기반)"""
         color = LED_COLORS.get(sound_type, LED_COLORS["default"])
         
-        if sound_type == "danger":
-            print(f"[LED] Mock: DANGER detected: {class_name} at {angle}° - activating red LED with blinking")
-            return self.blink_sound_type(sound_type, blink_count=10, blink_duration=1.0)
+        # danger, warning, help 타입만 각도 기반 LED 제어
+        if sound_type in ["danger", "warning", "help"]:
+            print(f"[LED] Mock: {sound_type.upper()} detected: {class_name} at {angle}° - activating directional LED")
+            return self.set_directional_led(angle, sound_type, class_name)
         else:
-            print(f"[LED] Mock: {sound_type.upper()} detected: {class_name} at {angle}° - activating LED")
+            print(f"[LED] Mock: {sound_type.upper()} detected: {class_name} - using default LED")
             return self.set_sound_type_color(sound_type, duration=5.0)
+    
+    def set_directional_led(self, angle: int, sound_type: str, class_name: str) -> bool:
+        """Mock 방향성 LED 제어"""
+        # 12개 LED 중 가장 가까운 LED 인덱스 계산
+        led_index = self._angle_to_led_index(angle)
+        
+        # 양옆 LED 인덱스 계산
+        left_led = (led_index - 1) % 12
+        right_led = (led_index + 1) % 12
+        
+        # 색상 가져오기
+        color = LED_COLORS.get(sound_type, LED_COLORS["default"])
+        
+        # RGB 값 추출
+        r = (color >> 16) & 0xFF
+        g = (color >> 8) & 0xFF
+        b = color & 0xFF
+        
+        print(f"[LED] Mock: Directional LED: angle {angle}° -> LED {led_index} (left: {left_led}, right: {right_led})")
+        print(f"[LED] Mock: Color: {sound_type} (R:{r:02X}, G:{g:02X}, B:{b:02X})")
+        
+        if sound_type == "danger":
+            print(f"[LED] Mock: DANGER - blinking directional LED 10 times")
+            return self._blink_directional_led_mock(led_index, left_led, right_led, color, blink_count=10, blink_duration=1.0)
+        else:
+            print(f"[LED] Mock: {sound_type.upper()} - directional LED for 5 seconds")
+            return True
+    
+    def _angle_to_led_index(self, angle: int) -> int:
+        """Mock 각도를 LED 인덱스로 변환"""
+        angle = angle % 360
+        led_index = int(round(angle / 30.0)) % 12
+        return led_index
+    
+    def _blink_directional_led_mock(self, led_index: int, left_led: int, right_led: int, color: int, blink_count: int = 10, blink_duration: float = 1.0) -> bool:
+        """Mock 방향성 LED 깜빡이기"""
+        print(f"[LED] Mock: Blinking LEDs {left_led}, {led_index}, {right_led} {blink_count} times")
+        for i in range(blink_count):
+            print(f"[LED] Mock: Blink {i+1}/{blink_count} - LEDs {left_led}, {led_index}, {right_led} ON")
+            time.sleep(blink_duration)
+            print(f"[LED] Mock: Blink {i+1}/{blink_count} - LEDs OFF")
+            if i < blink_count - 1:
+                time.sleep(blink_duration)
+        return True
     
     def turn_off(self) -> bool:
         """Mock 끄기"""

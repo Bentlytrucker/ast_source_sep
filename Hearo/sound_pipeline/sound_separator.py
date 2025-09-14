@@ -30,6 +30,21 @@ except ImportError:
     ASTFeatureExtractor = None
     ASTForAudioClassification = None
 
+# separator.py의 핵심 함수들 import
+try:
+    # 상대 경로로 separator.py import
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+    from separator import (
+        single_pass, ast_attention_freq_time, classify_audio_segment,
+        load_fixed_audio, norm01, presence_from_energy, cos_similarity_over_omega,
+        adaptive_masking_strategy, adaptive_strategy_selection
+    )
+    SEPARATOR_AVAILABLE = True
+    print("[Separator] ✅ separator.py functions imported successfully")
+except ImportError as e:
+    print(f"[Separator] ⚠️ Could not import separator.py functions: {e}")
+    SEPARATOR_AVAILABLE = False
+
 # =========================
 # Global Constants (separator.py 최신 버전)
 # =========================
@@ -288,7 +303,8 @@ class SoundSeparator:
                 sample_rate=SR, norm="slaney"
             )
             self.mel_fb_m2f = mel_fb_f2m.T.contiguous()
-            print("[Separator] ✅ Mel filterbank created")
+            print(f"[Separator] ✅ Mel filterbank created: {self.mel_fb_m2f.shape}")
+            print(f"[Separator] Expected: [N_MELS={N_MELS}, fbins={fbins}]")
             
             # 10. 최종 메모리 정리
             print("[Separator] 🔍 Final memory cleanup...")
@@ -694,6 +710,111 @@ class SoundSeparator:
             print(f"[Separator] ❌ Classification error: {e}")
             return "Unknown", "other", 0, 0.0
     
+    def _separate_with_separator_py(self, audio: np.ndarray, max_passes: int = 3, on_pass_complete=None) -> List[Dict[str, Any]]:
+        """
+        separator.py의 single_pass 함수를 사용한 음원 분리
+        """
+        print(f"[Separator] Using separator.py logic for {max_passes} passes...")
+        
+        separated_sources = []
+        used_mask_prev = None
+        prev_anchors = []
+        prev_energy_ratio = 1.0
+        separated_time_regions = []
+        previous_anchors = []
+        
+        # mel filterbank 생성 (separator.py와 동일)
+        fbins = N_FFT//2 + 1
+        mel_fb_f2m = torchaudio.functional.melscale_fbanks(
+            n_freqs=fbins, f_min=0.0, f_max=SR/2, n_mels=N_MELS,
+            sample_rate=SR, norm="slaney"
+        )
+        mel_fb_m2f = mel_fb_f2m.T.contiguous()
+        
+        for pass_idx in range(max_passes):
+            print(f"[Separator] --- Pass {pass_idx + 1} ---")
+            
+            try:
+                # separator.py의 single_pass 함수 호출
+                result = single_pass(
+                    audio=audio,
+                    extractor=self.extractor,
+                    ast_model=self.ast_model,
+                    mel_fb_m2f=mel_fb_m2f,
+                    used_mask_prev=used_mask_prev,
+                    prev_anchors=prev_anchors,
+                    pass_idx=pass_idx,
+                    out_dir=None,  # 파일 저장은 별도로 처리
+                    prev_energy_ratio=prev_energy_ratio,
+                    separated_time_regions=separated_time_regions,
+                    previous_anchors=previous_anchors
+                )
+                
+                if result is None:
+                    print(f"[Separator] Pass {pass_idx + 1} completed - no more sources to separate")
+                    break
+                
+                # separator.py의 single_pass는 (src_amp, res, er, None, info) 튜플을 반환
+                src_amp, res, er, _, info = result
+                
+                # info 딕셔너리에서 분류 정보 추출
+                separated_audio = src_amp  # 분리된 오디오
+                class_name = info.get('class_name', 'unknown')
+                sound_type = info.get('sound_type', 'other')
+                confidence = info.get('confidence', 0.0)
+                class_id = info.get('class_id', -1)
+                
+                if separated_audio is not None:
+                    # dB 계산
+                    db_min, db_max, db_mean = self._calculate_decibel_from_raw(separated_audio)
+                    
+                    source_info = {
+                        'audio': separated_audio,
+                        'class_name': class_name,
+                        'sound_type': sound_type,
+                        'confidence': confidence,
+                        'class_id': class_id,
+                        'pass': pass_idx + 1,
+                        'db_min': db_min,
+                        'db_max': db_max,
+                        'db_mean': db_mean
+                    }
+                    
+                    separated_sources.append(source_info)
+                    
+                    # 콜백 호출
+                    if on_pass_complete:
+                        on_pass_complete(source_info)
+                    
+                    print(f"[Separator] Pass {pass_idx + 1}: {class_name} ({sound_type}) - Confidence: {confidence:.3f}")
+                else:
+                    print(f"[Separator] Pass {pass_idx + 1}: No audio separated")
+                
+                # 다음 패스를 위한 상태 업데이트
+                # info에서 필요한 정보 추출
+                used_mask_prev = info.get('src_time_mask')  # 사용된 시간 마스크
+                # prev_anchors는 info에서 직접 가져올 수 없으므로 빈 리스트로 유지
+                # prev_energy_ratio는 info에서 직접 가져올 수 없으므로 1.0으로 유지
+                
+                # 분리된 시간 영역 정보 업데이트
+                if separated_audio is not None:
+                    time_region = {
+                        'time_mask': info.get('src_time_mask'),
+                        'class_name': class_name,
+                        'confidence': confidence,
+                        'pass': pass_idx + 1
+                    }
+                    separated_time_regions.append(time_region)
+                
+            except Exception as e:
+                print(f"[Separator] Error in pass {pass_idx + 1}: {e}")
+                import traceback
+                traceback.print_exc()
+                break
+        
+        print(f"[Separator] Separation completed: {len(separated_sources)} sources found")
+        return separated_sources
+    
     def _save_separated_audio(self, audio: np.ndarray, class_name: str, sound_type: str, output_dir: str, suffix: str = "") -> str:
         """
         분리된 오디오를 파일로 저장
@@ -807,7 +928,12 @@ class SoundSeparator:
                             else:
                                 print(f"[Separator] No LED controller available for {source_info['class_name']}")
                     
-                    separated_sources = self.separate_audio(audio_normalized, max_passes=MAX_PASSES, on_pass_complete=on_pass_complete)
+                    # separator.py의 single_pass 함수 사용
+                    if SEPARATOR_AVAILABLE:
+                        separated_sources = self._separate_with_separator_py(audio_normalized, max_passes=MAX_PASSES, on_pass_complete=on_pass_complete)
+                    else:
+                        print("[Separator] ⚠️ separator.py not available, using fallback separation")
+                        separated_sources = self.separate_audio(audio_normalized, max_passes=MAX_PASSES, on_pass_complete=on_pass_complete)
                     
                     # 분리된 소리들을 파일로 저장
                     for i, source in enumerate(separated_sources):
@@ -1034,11 +1160,20 @@ class SoundSeparator:
         P = (mag * mag).clamp_min(EPS)
         phase = torch.angle(st)
 
+        # Mel filterbank 차원 확인 및 조정
         if mel_fb_m2f.shape[0] != N_MELS:
             mel_fb_m2f = mel_fb_m2f.T.contiguous()
-        else:
-            mel_fb_m2f = mel_fb_m2f
-        assert mel_fb_m2f.shape[0] == N_MELS and mel_fb_m2f.shape[1] == P.shape[0]
+        
+        # 차원 검증 및 조정
+        if mel_fb_m2f.shape[0] != N_MELS or mel_fb_m2f.shape[1] != P.shape[0]:
+            print(f"  ⚠️ Mel filterbank dimension mismatch: {mel_fb_m2f.shape} vs expected [{N_MELS}, {P.shape[0]}]")
+            # 차원을 맞춤
+            min_mels = min(mel_fb_m2f.shape[0], N_MELS)
+            min_freqs = min(mel_fb_m2f.shape[1], P.shape[0])
+            mel_fb_m2f = mel_fb_m2f[:min_mels, :min_freqs]
+            P = P[:min_freqs, :]
+            print(f"  ✅ Adjusted dimensions: mel_fb_m2f {mel_fb_m2f.shape}, P {P.shape}")
+        
         mel_fb_m2f = mel_fb_m2f.to(P.dtype).to(P.device)
         mel_pow = (mel_fb_m2f @ P).clamp_min(EPS)
         return st, mag, P, phase, mel_pow

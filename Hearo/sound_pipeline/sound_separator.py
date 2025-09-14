@@ -736,11 +736,12 @@ class SoundSeparator:
             
             try:
                 # separator.py의 single_pass 함수 호출
+                # mel_fb_m2f를 전달하되, separator.py 내부에서 차원 불일치 처리
                 result = single_pass(
                     audio=audio,
                     extractor=self.extractor,
                     ast_model=self.ast_model,
-                    mel_fb_m2f=mel_fb_m2f,
+                    mel_fb_m2f=mel_fb_m2f,  # mel filterbank 전달
                     used_mask_prev=used_mask_prev,
                     prev_anchors=prev_anchors,
                     pass_idx=pass_idx,

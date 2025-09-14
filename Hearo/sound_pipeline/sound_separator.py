@@ -210,40 +210,77 @@ class SoundSeparator:
     
     def _initialize_model(self):
         """AST 모델 초기화 (Raspberry Pi 최적화)"""
+        print("[Separator] 🔍 Starting model initialization...")
+        
         try:
+            # 1. Transformers 라이브러리 확인
+            print("[Separator] 🔍 Checking transformers library...")
             if ASTFeatureExtractor is None or ASTForAudioClassification is None:
                 print("[Separator] ❌ Transformers not available - 실전 모드에서는 필수입니다!")
                 self.is_available = False
                 return
+            print("[Separator] ✅ Transformers library available")
             
-            print(f"[Separator] Loading AST model: {self.model_name}")
-            print(f"[Separator] Device: {self.device}")
-            print(f"[Separator] Threads: {TORCH_NUM_THREADS}")
+            # 2. PyTorch 및 torchaudio 확인
+            print("[Separator] 🔍 Checking PyTorch and torchaudio...")
+            print(f"[Separator] PyTorch version: {torch.__version__}")
+            print(f"[Separator] torchaudio version: {torchaudio.__version__}")
+            print(f"[Separator] CUDA available: {torch.cuda.is_available()}")
+            print("[Separator] ✅ PyTorch and torchaudio available")
             
-            # Raspberry Pi 최적화: 메모리 사용량 제한
+            # 3. 디바이스 설정 확인
+            print(f"[Separator] 🔍 Setting up device: {self.device}")
+            if self.device == "auto":
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[Separator] Final device: {self.device}")
+            
+            # 4. 스레드 설정
+            print(f"[Separator] 🔍 Setting threads: {TORCH_NUM_THREADS}")
+            torch.set_num_threads(TORCH_NUM_THREADS)
+            
+            # 5. 메모리 정리
+            print("[Separator] 🔍 Cleaning memory...")
             import gc
             gc.collect()
             
+            # 6. AST Feature Extractor 로딩
+            print(f"[Separator] 🔍 Loading AST Feature Extractor: {self.model_name}")
             self.extractor = ASTFeatureExtractor.from_pretrained(self.model_name)
+            print("[Separator] ✅ AST Feature Extractor loaded")
+            
+            # 7. AST Model 로딩
+            print(f"[Separator] 🔍 Loading AST Model: {self.model_name}")
             self.ast_model = ASTForAudioClassification.from_pretrained(
                 self.model_name,
                 attn_implementation="eager"  # Raspberry Pi 호환성
-            ).to(self.device)
-            self.ast_model.eval()
+            )
+            print("[Separator] ✅ AST Model loaded from pretrained")
             
-            # Mel filterbank 생성 (Raspberry Pi 최적화)
+            # 8. 디바이스로 이동
+            print(f"[Separator] 🔍 Moving model to device: {self.device}")
+            self.ast_model = self.ast_model.to(self.device)
+            self.ast_model.eval()
+            print("[Separator] ✅ Model moved to device and set to eval mode")
+            
+            # 9. Mel filterbank 생성
+            print("[Separator] 🔍 Creating Mel filterbank...")
             fbins = N_FFT//2 + 1
             mel_fb_f2m = torchaudio.functional.melscale_fbanks(
                 n_freqs=fbins, f_min=0.0, f_max=SR/2, n_mels=N_MELS,
                 sample_rate=SR, norm="slaney"
             )
             self.mel_fb_m2f = mel_fb_f2m.T.contiguous()
+            print("[Separator] ✅ Mel filterbank created")
             
-            # 메모리 정리
+            # 10. 최종 메모리 정리
+            print("[Separator] 🔍 Final memory cleanup...")
             gc.collect()
             
+            # 11. 성공 확인
             self.is_available = True
             print("[Separator] ✅ AST model loaded successfully (Raspberry Pi optimized)")
+            print(f"[Separator] Model device: {next(self.ast_model.parameters()).device}")
+            print(f"[Separator] Model dtype: {next(self.ast_model.parameters()).dtype}")
             
         except Exception as e:
             print(f"[Separator] ❌ Model loading error: {e}")

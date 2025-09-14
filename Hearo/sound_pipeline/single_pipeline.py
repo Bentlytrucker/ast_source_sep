@@ -72,15 +72,20 @@ class SingleSoundPipeline:
         print("2. Initializing DOA Calculator...")
         self.doa_calculator = create_doa_calculator()
         
-        # Initialize Sound Separator
-        print("3. Initializing Sound Separator...")
-        self.sound_separator = create_sound_separator(self.model_name, self.device, self.backend_url)
-        
-        # Initialize LED Controller
-        print("4. Initializing LED Controller...")
+        # Initialize LED Controller first (needed for Sound Separator)
+        print("3. Initializing LED Controller...")
         self.led_controller = create_led_controller()
         if self.led_controller is None:
             print("⚠️ LED Controller not available - LED control disabled")
+        
+        # Initialize Sound Separator with LED Controller
+        print("4. Initializing Sound Separator...")
+        self.sound_separator = create_sound_separator(
+            self.model_name, 
+            self.device, 
+            self.backend_url, 
+            self.led_controller  # LED 컨트롤러 주입
+        )
         
         print("=== Single Thread Pipeline Ready ===")
     

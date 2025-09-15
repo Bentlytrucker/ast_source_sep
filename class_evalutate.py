@@ -42,7 +42,7 @@ class FSD50KEvaluator:
     """FSD50K 평가기"""
     
     def __init__(self):
-        self.eval_audio_dir = "FSD50K.eval_audio"
+        self.eval_audio_dir = "FSD50K.eval_audio/FSD50K.eval_audio"
         self.ground_truth_file = "FSD50K.ground_truth/eval.csv"
         self.results = []
         
@@ -227,12 +227,13 @@ class FSD50KEvaluator:
         return target_files
     
     def load_audio(self, file_path: str) -> np.ndarray:
-        """오디오 파일 로드"""
+        """오디오 파일 로드 (동적 길이)"""
         try:
             if SEPARATOR_AVAILABLE:
-                audio, sr = librosa.load(file_path, sr=separator.SR, duration=separator.WIN_SEC)
+                # duration 제한 제거하여 전체 오디오 로드
+                audio, sr = librosa.load(file_path, sr=separator.SR)
             else:
-                audio, sr = librosa.load(file_path, sr=16000, duration=4.096)
+                audio, sr = librosa.load(file_path, sr=16000)
             return audio
         except Exception as e:
             self.log(f"Error loading {file_path}: {e}")
@@ -288,18 +289,20 @@ class FSD50KEvaluator:
             except:
                 pass
             
-            # 동적 패스 수 계산 (라벨 개수 기반)
+            # 동적 패스 수 계산 (eval.csv의 실제 라벨 수 기반)
+            # target_classes는 eval.csv에서 해당 파일에 기록된 모든 클래스들
             if target_classes:
-                # 타겟 클래스 개수에 맞춰 패스 수 설정 (제한 없음)
+                # eval.csv에 기록된 클래스 수만큼 패스 실행
                 num_passes = len(target_classes)
             else:
-                # 기본값: 오디오 길이 기반
+                # Fallback: 오디오 길이 기반
                 audio_duration = len(mixture) / separator.SR
                 num_passes = max(1, int(audio_duration / 2.0))
             
             print(f"🎵 Audio duration: {len(mixture) / separator.SR:.2f}s")
             print(f"🎯 Target classes: {len(target_classes) if target_classes else 'unknown'}")
-            print(f"🔄 Dynamic passes: {num_passes} (based on {'label count' if target_classes else 'duration'})")
+            print(f"🔄 Dynamic passes: {num_passes} (based on {'eval.csv label count' if target_classes else 'duration'})")
+            print(f"📋 Using {num_passes} passes as determined by eval.csv labels")
             
             # Multi-pass separation
             separated_audios = []

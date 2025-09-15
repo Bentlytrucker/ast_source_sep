@@ -25,7 +25,7 @@ import torchaudio
 import matplotlib.pyplot as plt
 from transformers import ASTFeatureExtractor, ASTForAudioClassification
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 warnings.filterwarnings("ignore")
 torch.set_num_threads(4)
@@ -112,6 +112,9 @@ class ASTCache:
 # 전역 캐시 인스턴스
 ast_cache = ASTCache()
 
+# 전역 변수: 모델 추론 시작 시간 (하나의 음성 파일에 대해 모든 패스에서 동일하게 사용)
+inference_start_time = None
+
 # =========================
 # Utility Functions
 # =========================
@@ -194,18 +197,17 @@ def calculate_decibel(audio: np.ndarray) -> Tuple[float, float, float]:
 # Audio Processing Functions
 # =========================
 def load_fixed_audio(file_path: str) -> np.ndarray:
-    """Load and fix audio to WIN_SEC length"""
+    """Load audio with 10-second limit"""
     wav, sr = torchaudio.load(file_path)
     if sr != SR:
         wav = torchaudio.functional.resample(wav, sr, SR)
     
     audio = wav[0].numpy()
     
-    # Fix length to WIN_SEC
-    if len(audio) < L_FIXED:
-        audio = np.pad(audio, (0, L_FIXED - len(audio)), mode='constant')
-    else:
-        audio = audio[:L_FIXED]
+    # 10초 이하 오디오만 처리
+    max_length = int(10.0 * SR)  # 10 seconds max
+    if len(audio) > max_length:
+        audio = audio[:max_length]
     
     return audio.astype(np.float32)
 
@@ -352,15 +354,15 @@ def classify_audio_segment(audio: np.ndarray, extractor, ast_model) -> Tuple[str
     sound_type = get_sound_type(predicted_class_id)
     
     # Top 5 클래스 추출
-    top5_probs, top5_indices = torch.topk(probabilities[0], 5)
-    top5_classes = []
-    for i in range(5):
-        class_id = top5_indices[i].item()
-        class_name_top5 = ast_model.config.id2label[class_id]
-        prob = top5_probs[i].item()
-        top5_classes.append((class_name_top5, prob, class_id))
+    top1_probs, top1_indices = torch.topk(probabilities[0], 1)
+    top1_classes = []
     
-    return class_name, sound_type, predicted_class_id, confidence, top5_classes
+    class_id = top1_indices[0].item()
+    class_name_top1 = ast_model.config.id2label[class_id]
+    prob = top1_probs[0].item()
+    top1_classes.append((class_name_top1, prob, class_id))
+    
+    return class_name, sound_type, predicted_class_id, confidence, top1_classes
 
 @torch.no_grad()
 def ast_attention_and_classify(audio: np.ndarray, extractor, ast_model, T_out: int, F_out: int, mel_fb_m2f: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str, str, int, float, List[Tuple[str, float, int]], torch.Tensor]:
@@ -670,13 +672,12 @@ def improved_adaptive_masking_strategy(Xmel: torch.Tensor, w_bar: torch.Tensor, 
     
     # 2. 동적 유사도 임계값 설정
     similarity_threshold = confidence
-    print(f"    🎯 Dynamic similarity threshold: {similarity_threshold:.3f}")
+    
     
     # 3. 유사도 기반 마스크 생성 (전체 시간 구간에 일관성 있게 적용)
     high_similarity_mask = (cos_t_raw >= similarity_threshold).float()
     low_similarity_mask = (cos_t_raw < similarity_threshold).float()
     
-    print(f"    🎯 High similarity frames: {high_similarity_mask.sum().item()}/{len(cos_t_raw)}")
     
     # 4. 주파수 가중치 계산
     # Linear 도메인에서 직접 계산
@@ -745,8 +746,8 @@ def improved_adaptive_masking_strategy(Xmel: torch.Tensor, w_bar: torch.Tensor, 
     M_lin = torch.minimum(M_combined, spec_magnitude)
     M_lin = torch.clamp(M_lin, 0.0, 1.0)
     
-    print(f"    🎯 Template frequency weights applied to {high_similarity_mask.sum().item()}/{len(cos_t_raw)} time frames")
-    print(f"    🎯 Frequency boost mask active on {freq_boost_mask.sum().item()}/{len(freq_boost_mask)} frequency bins")
+    # print(f"    🎯 Template frequency weights applied to {high_similarity_mask.sum().item()}/{len(cos_t_raw)} time frames")
+    # print(f"    🎯 Frequency boost mask active on {freq_boost_mask.sum().item()}/{len(freq_boost_mask)} frequency bins")
     
     # 8.5. 추가 에너지 보존 검증 (마스크 단계에서)
     # 각 시간 프레임별로 마스크가 원본을 초과하지 않도록 검증
@@ -786,14 +787,14 @@ def improved_adaptive_masking_strategy(Xmel: torch.Tensor, w_bar: torch.Tensor, 
                     M_lin[:, t] = M_lin[:, t] * scale_factor
                     scaled_count += 1
         
-        if scaled_count > 0:
-            print(f"  📊 Low similarity regions: {scaled_count} time frames scaled to 1% anchor energy (threshold: {similarity_threshold:.3f})")
+        #if scaled_count > 0:
+            #print(f"  📊 Low similarity regions: {scaled_count} time frames scaled to 1% anchor energy (threshold: {similarity_threshold:.3f})")
     
     # 마스크를 1.0으로 제한 (원본을 초과하지 않도록)
     M_lin = torch.clamp(M_lin, 0.0, 1.0)
     
     # 간단한 통계 출력
-    print(f"  📊 Mask ({strategy}): mean={M_lin.mean().item():.3f}, conf={confidence:.3f}, boost={freq_weight.max().item():.1f}x")
+    #print(f"  📊 Mask ({strategy}): mean={M_lin.mean().item():.3f}, conf={confidence:.3f}, boost={freq_weight.max().item():.1f}x")
     
     return M_lin, cos_t_raw, freq_weight
 
@@ -811,25 +812,25 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
 
     t0 = time.time()
     
-    # 1. 전체 오디오 에너지 체크 및 증폭
+    # 1. 전체 오디오 에너지 체크
     overall_energy = np.mean(audio**2)
-    amplification_factor = 1.0
     
-    if overall_energy < MIN_ANCHOR_ENERGY:
-        # 전체 오디오가 작으면 증폭
-        energy_ratio = MIN_ANCHOR_ENERGY / (overall_energy + 1e-8)
-        amplification_factor = min(AMPLIFICATION_FACTOR * np.sqrt(energy_ratio), MAX_AMPLIFICATION)
-        
-        print(f"  🔊 Overall audio energy too low ({overall_energy:.6f}), amplifying by factor: {amplification_factor:.1f}")
-        audio = audio * amplification_factor
-        
-        # 클리핑 방지
-        max_val = np.max(np.abs(audio))
-        if max_val > 1.0:
-            audio = audio / max_val
-            print(f"  ⚠️ Clipping prevented, scaled by {1.0/max_val:.3f}")
+    # 에너지가 너무 낮으면 증폭하지 않고 패스 건너뛰기
+    if overall_energy < MIN_ANCHOR_ENERGY * 0.5:  # 더 엄격한 임계값
+        print(f"  ⚠️ Audio energy too low ({overall_energy:.6f}), skipping separation")
+        return np.zeros_like(audio), audio, 0.0, None, {
+            "src_amp": np.zeros_like(audio),
+            "res": audio,
+            "er": 0.0,
+            "class_name": "Silence",
+            "sound_type": "other",
+            "confidence": 0.0,
+            "elapsed": time.time() - time.time(),
+            "separation_skipped": True
+        }
+    # 증폭 제거 - 에너지가 낮아도 원본 그대로 사용
     
-    # 2. 증폭된 오디오로 STFT 계산
+    # 2. 오디오로 STFT 계산
     st, mag, P, phase, Xmel = stft_all(audio, mel_fb_m2f)
     fbins, T = P.shape
     La = int(round(ANCHOR_SEC * SR / HOP))
@@ -868,14 +869,28 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     # 앵커 스코어 계산 (이전 앵커 영역과 어텐션 상위 30% 패치 제외)
     Sc = anchor_score(A_t, Pur)
 
-    print(f"  🎯 Detected: {class_name} ({sound_type}) - Confidence: {confidence:.3f}")
+    print(f"  🎯 Pass {pass_idx + 1}: {class_name} (Confidence: {confidence:.3f})")
     
-    # Top 5 클래스 출력
-    print(f"  📊 Top 5 predictions:")
-    for i, (cls_name, prob, cls_id) in enumerate(top5_classes):
-        cls_type = get_sound_type(cls_id)
-        marker = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "  " if i == 3 else "  "
-        print(f"    {marker} {i+1}. {cls_name} ({cls_type}) - {prob:.3f}")
+    # Silence 감지 시 즉시 패스 종료 (강화된 감지)
+    silence_keywords = ['silence', 'silent', 'quiet', 'no sound', 'mute', 'hush', 'stillness']
+    is_silence = (class_name.lower() in silence_keywords or 
+                  confidence < 0.05 or 
+                  'silence' in class_name.lower() or
+                  'quiet' in class_name.lower())
+    
+    if is_silence:
+        print(f"  ⚠️ Silence detected: '{class_name}' (confidence: {confidence:.3f}), stopping separation")
+        return np.zeros_like(audio), audio, 0.0, None, {
+            "src_amp": np.zeros_like(audio),
+            "res": audio,
+            "er": 0.0,
+            "class_name": "Silence",
+            "sound_type": "other",
+            "confidence": confidence,
+            "elapsed": time.time() - t0,
+            "separation_skipped": True,
+            "silence_detected": True
+        }
     
     # 순수도 계산
     global_purity = calculate_global_purity(Xmel, None, None)  # 임시로 None 전달
@@ -904,16 +919,18 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
             used_mask_prev = align_len_1d(used_mask_prev, T, device=Sc.device, mode="linear")
         Sc = Sc * (1.0 - used_mask_prev)
 
-    # Suppress previous anchors
+    # Suppress previous anchors (강화된 억제)
     for prev_s, prev_e, prev_mask, prev_weight, prev_anchor_score in prev_anchors:
         if prev_mask.shape[0] != T:
             prev_mask = align_len_1d(prev_mask, T, device=Sc.device, mode="linear")
         ca = (prev_s + prev_e) // 2
-        sigma = (prev_e - prev_s) / 6.0
+        sigma = (prev_e - prev_s) / 4.0  # 더 좁은 시그마로 강한 억제
         idx = torch.arange(T, device=Sc.device) - ca
-        Sc = Sc * (1 - 0.3 * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
+        # 이전 앵커 영역에 더 강한 억제 적용
+        Sc = Sc * (1 - 0.8 * torch.exp(-(idx**2)/(2*(sigma**2)+1e-8)))
         core_s = max(0, ca - La//2); core_e = min(T, ca + La//2)
-        Sc[core_s:core_e] *= 0.2
+        Sc[core_s:core_e] *= 0.05  # 핵심 영역은 거의 0으로
+        print(f"    🚫 Suppressed previous anchor region [{prev_s}:{prev_e}] (center: {ca})")
     
     # Pick anchor and core regions using AST attention (simplified)
     s, e, core_s_rel, core_e_rel = find_attention_based_anchor(attention_matrix, La, T)
@@ -947,7 +964,6 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     
     # 적응적 전략 선택
     strategy = adaptive_strategy_selection(prev_energy_ratio, pass_idx)
-    print(f"  🎯 Strategy: {strategy}")
     
     # Create separation mask with improved adaptive strategy
     M_lin, cos_t_raw, freq_weight = improved_adaptive_masking_strategy(Xmel, w_bar, omega, ast_freq_attn, P, mel_fb_m2f, s, e, Ablk, confidence, strategy)
@@ -968,9 +984,9 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
     
     # === 에너지 보존 마스킹 전략 ===
     # 디버깅: 차원 확인
-    print(f"  🔍 Debug - M_lin shape: {M_lin.shape}, mag shape: {mag.shape}")
-    print(f"  🔍 Debug - M_lin device: {M_lin.device}, mag device: {mag.device}")
-    print(f"  🔍 Debug - M_lin dtype: {M_lin.dtype}, mag dtype: {mag.dtype}")
+    # print(f"  🔍 Debug - M_lin shape: {M_lin.shape}, mag shape: {mag.shape}")
+    # print(f"  🔍 Debug - M_lin device: {M_lin.device}, mag device: {mag.device}")
+    # print(f"  🔍 Debug - M_lin dtype: {M_lin.dtype}, mag dtype: {mag.dtype}")
     
     # 차원 맞추기
     if M_lin.shape != mag.shape:
@@ -1042,10 +1058,10 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
                      window=WINDOW, center=True, length=L_FIXED).detach().cpu().numpy()
     
     # 증폭된 경우 최종 결과도 증폭된 상태로 유지
-    if amplification_factor > 1.0:
-        print(f"  🔊 Amplified result (factor: {amplification_factor:.1f})")
-    else:
-        print(f"  📊 No amplification applied")
+    # if amplification_factor > 1.0:
+    #     print(f"  🔊 Amplified result (factor: {amplification_factor:.1f})")
+    # else:
+    #     print(f"  📊 No amplification applied")
     
     # 진폭 검증 및 정규화 (클리핑 방지)
     src_max = np.max(np.abs(src_amp))
@@ -1077,7 +1093,7 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         debug_plot(pass_idx, audio, src_amp, res, Sc, P, M_lin, A_t, ast_freq_attn, 
                   s, e, core_s_rel, core_e_rel, class_name, confidence, out_dir, 
                   original_audio=audio, global_confidence=confidence, global_purity=global_purity,
-                  similarity_scores=cos_t_raw, amplification_factor=amplification_factor, attention_map=A_t,
+                  similarity_scores=cos_t_raw, amplification_factor=1.0, attention_map=A_t,
                   attention_matrix=attention_matrix, purity_scores=Pur, ast_spectrogram=ast_spectrogram)
     
     # Decibel analysis
@@ -1099,7 +1115,8 @@ def single_pass(audio: np.ndarray, extractor, ast_model,
         "anchor_score": Sc,  # 현재 패스의 anchor score 추가
         "db_min": db_min,
         "db_max": db_max,
-        "db_mean": db_mean
+        "db_mean": db_mean,
+        "separation_mask": M_lin  # 분리 마스크 추가
     }
     
     return src_amp, res, er, None, info
@@ -1496,8 +1513,8 @@ def debug_plot(pass_idx: int, audio: np.ndarray, src_amp: np.ndarray, res: np.nd
             # Energy ratio calculation
             energy_ratio = src_energy / (src_energy + res_energy + 1e-8)
             
-            # Amplification info
-            amp_info = f' (Amp: {amplification_factor:.1f}x)' if amplification_factor > 1.0 else ''
+            # Amplification info (제거됨)
+            amp_info = ''
             
             stats_text = f'Similarity Stats:\nLow (<0.6): {low_sim_count} ({low_sim_pct:.1f}%)\nHigh (≥0.6): {high_sim_count} ({high_sim_pct:.1f}%)\n\nEnergy Ratio: {energy_ratio:.3f}{amp_info}'
             axes[2, 2].text(0.02, 0.98, stats_text, transform=axes[2, 2].transAxes, 
@@ -1512,7 +1529,7 @@ def debug_plot(pass_idx: int, audio: np.ndarray, src_amp: np.ndarray, res: np.nd
         plt.savefig(debug_path, dpi=150, bbox_inches='tight')
         plt.close()
         
-        print(f"  📊 Debug plot saved: {debug_path}")
+        #print(f"  📊 Debug plot saved: {debug_path}")
         
     except Exception as e:
         import traceback
@@ -1524,7 +1541,7 @@ def debug_plot(pass_idx: int, audio: np.ndarray, src_amp: np.ndarray, res: np.nd
 # =========================
 def send_to_backend(sound_type: str, sound_detail: str, decibel: float, angle: int = 0, 
                    backend_url: str = "http://13.238.200.232:8000/sound-events/", 
-                   user_id: int = 6) -> bool:
+                   user_id: int = 6, occurred_at: str = None) -> bool:
     """
     백엔드로 분리된 소리 정보 전송
     
@@ -1535,6 +1552,7 @@ def send_to_backend(sound_type: str, sound_detail: str, decibel: float, angle: i
         angle: 방향각 (기본값: 0)
         backend_url: 백엔드 API URL
         user_id: 사용자 ID
+        occurred_at: 소리 발생 시간 (ISO format, None이면 현재 시간 사용)
     
     Returns:
         bool: 전송 성공 여부
@@ -1546,7 +1564,7 @@ def send_to_backend(sound_type: str, sound_detail: str, decibel: float, angle: i
             "sound_type": sound_type,
             "sound_detail": sound_detail,
             "angle": angle,
-            "occurred_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "occurred_at": occurred_at if occurred_at else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "sound_icon": "string",
             "location_image_url": "string",
             "decibel": float(decibel),
@@ -1558,7 +1576,7 @@ def send_to_backend(sound_type: str, sound_detail: str, decibel: float, angle: i
         }
         
         print(f"🔄 Sending to backend: {backend_url}")
-        print(f"📤 Data: {data}")
+       # print(f"📤 Data: {data}")
         
         # SSL 경고 비활성화 (테스트용)
         import urllib3
@@ -1592,6 +1610,50 @@ def send_to_backend(sound_type: str, sound_detail: str, decibel: float, angle: i
     except Exception as e:
         print(f"❌ Backend send error: {e}")
         return False
+
+def calculate_sound_occurrence_time(mask: torch.Tensor, inference_start_time: datetime, 
+                                   audio_duration: float = 4.096) -> str:
+    """
+    마스크에서 가장 빠른 시간을 계산하여 실제 소리 발생 시간을 반환
+    
+    Args:
+        mask: 분리 마스크 [freq_bins, time_frames]
+        inference_start_time: 모델 추론 시작 시간
+        audio_duration: 오디오 파일 길이 (초, 기본값: 4.0초)
+    
+    Returns:
+        str: ISO format의 실제 소리 발생 시간
+    """
+    try:
+        # 마스크에서 시간축으로 평균을 내어 활성화된 시간대 찾기
+        time_activity = mask.mean(dim=0)  # [time_frames]
+        
+        # 활성화 임계값 (마스크 평균의 10% 이상)
+        threshold = time_activity.max() * 0.1
+        
+        # 활성화된 시간 프레임들 찾기
+        active_frames = torch.where(time_activity >= threshold)[0]
+        
+        if len(active_frames) > 0:
+            # 가장 빠른 활성화 시간 (프레임 인덱스)
+            earliest_frame = active_frames[0].item()
+            
+            # 프레임을 시간으로 변환 (HOP 기반)
+            earliest_time_in_audio = earliest_frame * HOP / SR
+            
+            # 실제 발생 시간 = 추론 시작 시간 - 4초 + 타겟 소리 처음 생긴 구간
+            # (4초 녹음의 시작 시점에서 타겟 소리가 처음 생긴 시간을 더함)
+            actual_occurrence_time = inference_start_time - timedelta(seconds=audio_duration) + timedelta(seconds=earliest_time_in_audio)
+            
+            return actual_occurrence_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            # 활성화된 시간이 없으면 추론 시작 시간 사용
+            return inference_start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+    except Exception as e:
+        print(f"❌ Sound occurrence time calculation error: {e}")
+        # 에러 시 추론 시작 시간 사용
+        return inference_start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def calculate_decibel_from_audio(audio: np.ndarray) -> float:
     """
@@ -1645,13 +1707,28 @@ def main():
     
     os.makedirs(args.output, exist_ok=True)
     
-    # Load audio
+    # Load audio with dynamic length
     audio0 = load_fixed_audio(args.input)
     print(f"\n{'='*64}\n🎵 AST-guided Source Separator (Final Integrated Version)\n{'='*64}")
     print(f"Input: {args.input} ({len(audio0)/SR:.3f}s)")
     print(f"Strategy: {args.strategy}")
     print(f"Features: Adaptive Masking, Energy Conservation, Classification, Energy Suppression")
     print(f"Debug visualization: {'OFF' if args.no_debug else 'ON'}")
+    
+    # Dynamic pass calculation (only for standalone separator.py, not when called from class_eval.py)
+    audio_duration = len(audio0) / SR
+    
+    # Check if this is being called from class_eval.py by looking for specific arguments or environment
+    is_evaluation_mode = hasattr(args, 'evaluation_mode') and args.evaluation_mode
+    
+    if not is_evaluation_mode and args.passes == 3:  # Only adjust for standalone use
+        # For standalone separator.py, use duration-based calculation
+        dynamic_passes = max(1, min(10, int(audio_duration / 2.0)))
+        if dynamic_passes != args.passes:
+            print(f"🔄 Adjusted passes from {args.passes} to {dynamic_passes} based on audio length ({audio_duration:.1f}s)")
+            args.passes = dynamic_passes
+    elif is_evaluation_mode:
+        print(f"🎯 Evaluation mode: Using {args.passes} passes (set by class_eval.py)")
     
     # Mel filterbank setup
     fbins = N_FFT//2 + 1
@@ -1698,6 +1775,11 @@ def main():
     separated_time_regions = []  # 이전에 분리된 시간대 정보 저장
     previous_anchors = []  # 이전 패스에서 사용된 앵커 구간 정보
     
+    # 모델 추론 시작 시간 설정 (전역 변수)
+    global inference_start_time
+    inference_start_time = datetime.utcnow()
+    print(f"🕐 Model inference started at: {inference_start_time.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    
     # Main processing loop - 패스마다 AST 추론 수행
     total_ast_calls = 0
     for i in range(max(1, args.passes)):
@@ -1705,13 +1787,22 @@ def main():
         
         # 패스마다 AST 모델 호출 (현재 오디오로)
         total_ast_calls += 1
-        print(f"AST call #{total_ast_calls} for attention extraction...")
         
         src_amp, res, er, used_mask, info = single_pass(
             cur, extractor, ast_model, mel_fb_m2f, used_mask_prev, prev_anchors, 
             i, args.output if not args.no_debug else None, prev_energy_ratio,
             separated_time_regions, previous_anchors, original_audio=cur
         )
+        
+        # 잔여 오디오 에너지 검사 - 의미없는 수준이면 패스 중단
+        residual_energy = np.sum(res ** 2)
+        original_energy = np.sum(cur ** 2)
+        residual_ratio = residual_energy / (original_energy + 1e-10)
+        
+        # 에너지가 너무 낮거나 신뢰도가 너무 낮으면 중단
+        if residual_ratio < 0.02 or info['confidence'] < 0.10:  # 잔여 에너지 2% 미만 또는 신뢰도 10% 미만
+            print(f"  ⚠️ Stopping separation - Residual energy: {residual_ratio:.3f}, Confidence: {info['confidence']:.3f}")
+            break
         
         # Save separated source
         if info.get("separation_skipped", False):
@@ -1723,10 +1814,17 @@ def main():
         torchaudio.save(src_path, torch.from_numpy(src_amp).unsqueeze(0), SR)
         saved += 1
         
-        print(f"  Separated: {info['class_name']} ({info['sound_type']})")
-        print(f"  Confidence: {info['confidence']:.3f}")
-        print(f"  Energy Ratio: {er:.3f}")
-        print(f"  Elapsed: {info['elapsed']:.2f}s")
+        # 소리 발생 시간 계산 (마스크 기반)
+        if 'separation_mask' in info and info['separation_mask'] is not None:
+            occurred_at = calculate_sound_occurrence_time(
+                info['separation_mask'], 
+                inference_start_time, 
+                audio_duration=len(audio0)/SR
+            )
+        else:
+            occurred_at = inference_start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        print(f"  🕐 Sound occurrence time: {occurred_at}")
         
         # 백엔드로 분리된 소리 정보 전송
         if not args.no_backend:
@@ -1741,18 +1839,19 @@ def main():
                     decibel=decibel,
                     angle=args.angle,
                     backend_url=args.backend_url,
-                    user_id=args.user_id
+                    user_id=args.user_id,
+                    occurred_at=occurred_at
                 )
                 
                 if backend_success:
-                    print(f"  🌐 Backend transmission successful")
+                    print(f"  📤 Backend sent")
                 else:
-                    print(f"  ❌ Backend transmission failed")
+                    print(f"  ❌ Backend failed")
                     
             except Exception as e:
-                print(f"  ❌ Backend transmission error: {e}")
+                print(f"  ❌ Backend error: {e}")
         else:
-            print(f"  🚫 Backend transmission disabled")
+            print(f"  🚫 Backend disabled")
         
         # 분리된 시간대 정보 수집 (분리 건너뛰기가 아닌 경우만)
         if not info.get("separation_skipped", False):
@@ -1791,17 +1890,10 @@ def main():
         print(f"\n--- Final Residual Classification ---")
         # 실제 AST 모델 호출 (residual 오디오로)
         class_name, sound_type, class_id, confidence, top5_classes = classify_audio_segment(cur, extractor, ast_model)
-        print(f"  🎯 Residual: {class_name} ({sound_type}) - Confidence: {confidence:.3f}")
-        
-        # Top 5 클래스 출력
-        print(f"  📊 Top 5 residual predictions:")
-        for i, (cls_name, prob, cls_id) in enumerate(top5_classes):
-            cls_type = get_sound_type(cls_id)
-            marker = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "  " if i == 3 else "  "
-            print(f"    {marker} {i+1}. {cls_name} ({cls_type}) - {prob:.3f}")
+        print(f"  🎯 Residual: {class_name}")
         
         if confidence >= 0.1:
-            print(f"  ✅ High confidence residual detected (≥0.1), saving as classified sound...")
+            print(f"  ✅ High confidence residual detected, saving...")
             residual_path = os.path.join(args.output, f"{saved:02d}_{class_name}.wav")
             torchaudio.save(residual_path, torch.from_numpy(cur).unsqueeze(0), SR)
             saved += 1
@@ -1812,6 +1904,11 @@ def main():
                     # 데시벨 계산
                     decibel = calculate_decibel_from_audio(cur)
                     
+                    # 잔여물의 경우 전체 오디오 길이를 사용하여 발생 시간 계산
+                    # (잔여물은 전체 시간에 걸쳐 있을 수 있으므로 0초로 설정)
+                    occurred_at = (inference_start_time - timedelta(seconds=len(audio0)/SR)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    print(f"  🕐 Residual sound occurrence time: {occurred_at}")
+                    
                     # 백엔드 전송
                     backend_success = send_to_backend(
                         sound_type=sound_type,
@@ -1819,40 +1916,29 @@ def main():
                         decibel=decibel,
                         angle=args.angle,
                         backend_url=args.backend_url,
-                        user_id=args.user_id
+                        user_id=args.user_id,
+                        occurred_at=occurred_at
                     )
                     
                     if backend_success:
-                        print(f"  🌐 Residual backend transmission successful")
+                        print(f"  📤 Residual backend sent")
                     else:
-                        print(f"  ❌ Residual backend transmission failed")
+                        print(f"  ❌ Residual backend failed")
                         
                 except Exception as e:
-                    print(f"  ❌ Residual backend transmission error: {e}")
+                    print(f"  ❌ Residual backend error: {e}")
             else:
-                print(f"  🚫 Residual backend transmission disabled")
+                print(f"  🚫 Residual backend disabled")
         else:
-            print(f"  📝 Low confidence residual (<0.1), saving as generic residual...")
+            print(f"  📝 Low confidence residual, saving as generic...")
             residual_path = os.path.join(args.output, f"{saved:02d}_residual.wav")
             torchaudio.save(residual_path, torch.from_numpy(cur).unsqueeze(0), SR)
     
     total_time = time.time() - total_t0
-    print(f"\n{'='*64}")
-    print(f"✅ Processing completed in {total_time:.2f}s")
-    print(f"📁 Saved {saved} audio files to {args.output}")
-    print(f"🧠 Total AST calls: {total_ast_calls}")
-    print(f"{'='*64}")
-    
-    # 성능 검증
-    if total_time < 4.0:
-        print(f"✅ SUCCESS: Completed in {total_time:.2f}s (< 4s target)")
-    else:
-        print(f"⚠️  WARNING: Took {total_time:.2f}s (>= 4s target)")
-    
-    if total_ast_calls <= 3:
-        print(f"✅ SUCCESS: Used {total_ast_calls} AST calls (<= 3 target)")
-    else:
-        print(f"⚠️  WARNING: Used {total_ast_calls} AST calls (> 3 target)")
+    print(f"\n{'='*50}")
+    print(f"✅ Completed in {total_time:.2f}s - {saved} files saved")
+    print(f"🧠 AST calls: {total_ast_calls}")
+    print(f"{'='*50}")
 
 if __name__ == "__main__":
     main()

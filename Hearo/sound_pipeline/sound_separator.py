@@ -37,7 +37,8 @@ try:
     from separator import (
         single_pass, ast_attention_freq_time, classify_audio_segment,
         load_fixed_audio, norm01, presence_from_energy, cos_similarity_over_omega,
-        adaptive_masking_strategy, adaptive_strategy_selection, stft_all
+        adaptive_masking_strategy, adaptive_strategy_selection, stft_all,
+        calculate_sound_occurrence_time
     )
     SEPARATOR_AVAILABLE = True
     print("[Separator] ✅ separator.py functions imported successfully")
@@ -362,15 +363,19 @@ class SoundSeparator:
             print(f"[Separator] Error preparing audio for classification: {e}")
             return audio_raw.astype(np.float32) / 32767.0
     
-    def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int) -> bool:
+    def _send_to_backend(self, sound_type: str, sound_detail: str, decibel: float, angle: int, occurred_at: str = None) -> bool:
         """백엔드로 결과 전송"""
         try:
+            # 소리 발생시간이 제공되지 않으면 현재 시간 사용
+            if occurred_at is None:
+                occurred_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            
             data = {
                 "user_id": USER_ID,
                 "sound_type": sound_type,
                 "sound_detail": sound_detail,
                 "angle": angle,
-                "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "occurred_at": occurred_at,
                 "sound_icon": "string",
                 "location_image_url": "string",
                 "decibel": float(decibel),
@@ -651,6 +656,18 @@ class SoundSeparator:
                     # dB 계산
                     db_min, db_max, db_mean = self._calculate_decibel_from_raw(separated_audio)
                     
+                    # 소리 발생시간 계산 (separator.py와 동일한 로직)
+                    occurred_at = None
+                    if 'separation_mask' in info and info['separation_mask'] is not None:
+                        from datetime import datetime, timedelta
+                        inference_start_time = datetime.utcnow()  # 실제로는 녹음 시작 시간 사용
+                        occurred_at = calculate_sound_occurrence_time(
+                            info['separation_mask'], 
+                            inference_start_time, 
+                            audio_duration=len(audio)/SR
+                        )
+                        print(f"  🕐 Sound occurrence time: {occurred_at}")
+                    
                     source_info = {
                         'audio': separated_audio,
                         'class_name': class_name,
@@ -660,7 +677,9 @@ class SoundSeparator:
                         'pass': pass_idx + 1,
                         'db_min': db_min,
                         'db_max': db_max,
-                        'db_mean': db_mean
+                        'db_mean': db_mean,
+                        'occurred_at': occurred_at,
+                        'separation_mask': info.get('separation_mask')
                     }
                     
                     separated_sources.append(source_info)
@@ -752,12 +771,25 @@ class SoundSeparator:
                     def on_pass_complete(source_info):
                         """각 패스 완료 시마다 백엔드 전송 + LED 제어"""
                         if source_info['sound_type'] != "other":
+                            # 소리 발생시간 계산 (separator.py와 동일한 로직)
+                            occurred_at = None
+                            if 'separation_mask' in source_info and source_info['separation_mask'] is not None:
+                                from datetime import datetime, timedelta
+                                inference_start_time = datetime.utcnow()  # 실제로는 녹음 시작 시간 사용
+                                occurred_at = calculate_sound_occurrence_time(
+                                    source_info['separation_mask'], 
+                                    inference_start_time, 
+                                    audio_duration=len(audio_normalized)/SR
+                                )
+                                print(f"  🕐 Sound occurrence time: {occurred_at}")
+                            
                             print(f"[Separator] Sending separated source to backend: {source_info['class_name']} ({source_info['sound_type']})")
                             backend_success = self._send_to_backend(
                                 source_info['sound_type'], 
                                 source_info['class_name'], 
                                 source_info.get('db_mean', db_mean), 
-                                angle
+                                angle,
+                                occurred_at=occurred_at
                             )
                             if backend_success:
                                 print(f"[Separator] ✅ Backend transmission successful for {source_info['class_name']}")

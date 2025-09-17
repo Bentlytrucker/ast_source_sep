@@ -198,16 +198,19 @@ class SingleSoundPipeline:
             import requests
             from datetime import datetime
             
+            # 소리 발생시간이 source에 포함되어 있으면 사용, 없으면 현재 시간 사용
+            occurred_at = source.get('occurred_at', datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+            
             # 백엔드 전송 데이터 구성
             data = {
                 "user_id": 6,
                 "sound_type": source['sound_type'],
                 "sound_detail": source['class_name'],
                 "angle": angle,
-                "occurred_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "occurred_at": occurred_at,
                 "sound_icon": "string",
                 "location_image_url": "string",
-                "decibel": 60.0  # 기본값, 실제로는 계산된 값 사용
+                "decibel": source.get('db_mean', 60.0)  # 실제 계산된 값 사용
             }
             
             # 백엔드로 전송

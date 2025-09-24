@@ -562,19 +562,28 @@ class SoundSeparator:
             return None
     
     def separate_audio(self, audio: np.ndarray, angle: int, max_passes: int = 3, on_pass_complete=None) -> List[Dict[str, Any]]:
-        """separator.py의 최신 멀티패스 음원 분리 로직을 직접 사용"""
-        # separator.py의 상수/클래스 import (이미 상단에서 import했다고 가정)
+        """separator.py의 최신 멀티패스 음원 분리 로직을 직접 사용 (입력은 float64로 변환)"""
         from separator import multi_pass_separation, ASTProcessor, SR, L_INPUT, L_MODEL
 
+        # 입력 오디오를 float64로 변환
+        if audio.dtype == np.int16:
+            audio_float = audio.astype(np.float64)
+        elif audio.dtype == np.float32:
+            audio_float = audio.astype(np.float64)
+        elif audio.dtype == np.float64:
+            audio_float = audio.copy()
+        else:
+            audio_float = audio.astype(np.float64)
+
         # 오디오 길이 맞추기 (4.096초/10.24초)
-        if len(audio) < L_INPUT:
-            audio_4sec = np.pad(audio, (0, L_INPUT - len(audio)))
+        if len(audio_float) < L_INPUT:
+            audio_4sec = np.pad(audio_float, (0, L_INPUT - len(audio_float)))
         else:
-            audio_4sec = audio[:L_INPUT]
-        if len(audio) < L_MODEL:
-            audio_10sec = np.pad(audio, (0, L_MODEL - len(audio)))
+            audio_4sec = audio_float[:L_INPUT]
+        if len(audio_float) < L_MODEL:
+            audio_10sec = np.pad(audio_float, (0, L_MODEL - len(audio_float)))
         else:
-            audio_10sec = audio[:L_MODEL]
+            audio_10sec = audio_float[:L_MODEL]
 
         # ASTProcessor 인스턴스 생성 (CPU 고정)
         ast_processor = ASTProcessor()
@@ -585,7 +594,6 @@ class SoundSeparator:
         # 결과 변환 및 후처리
         separated_sources = []
         for idx, result in enumerate(results):
-            # dB 계산 (원하면 기존 방식 활용)
             db_min = db_max = db_mean = None
             try:
                 db_min, db_max, db_mean = self._calculate_decibel_from_raw(result.separated_audio)
@@ -594,7 +602,7 @@ class SoundSeparator:
             source_info = {
                 'audio': result.separated_audio,
                 'class_name': result.classification['predicted_class'],
-                'sound_type': 'other',  # 필요시 분류
+                'sound_type': 'other',
                 'confidence': result.classification['confidence'],
                 'class_id': -1,
                 'pass': idx + 1,

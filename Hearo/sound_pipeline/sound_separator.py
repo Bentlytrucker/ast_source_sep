@@ -35,7 +35,7 @@ try:
     # 상대 경로로 separator.py import
     sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
     from separator import (
-        single_pass, ast_attention_freq_time, classify_audio_segment,
+        single_pass, ast_attention_freq_time_cached, classify_audio_segment,
         load_fixed_audio, norm01, presence_from_energy, cos_similarity_over_omega,
         adaptive_masking_strategy, adaptive_strategy_selection, stft_all,
         calculate_sound_occurrence_time
@@ -76,7 +76,7 @@ AST_FREQ_QUANTILE_AGGRESSIVE = 0.4
 
 DANGER_IDS = {396, 397, 398, 399, 400, 426, 436}
 HELP_IDS = {23, 14, 354, 355, 356, 359}
-WARNING_IDS = {288, 364, 388, 389, 390, 439, 391, 392, 393, 395, 440, 441, 443, 456, 469, 470, 478, 479}
+WARNING_IDS = {0,288, 364, 388, 389, 390, 439, 391, 392, 393, 395, 440, 441, 443, 456, 469, 470, 478, 479}
 
 PRES_Q = 0.20
 PRES_SMOOTH_T = 9
@@ -459,15 +459,15 @@ class SoundSeparator:
             
             # Sound Trigger와 동일한 모노 변환 방식
             if channels > 1:
-                    # Sound Trigger의 _to_mono_int16과 동일한 로직
-                    usable_len = (len(audio_data) // channels) * channels
-                    if usable_len != len(audio_data):
-                        audio_data = audio_data[:usable_len]
-                    x = audio_data.reshape(-1, channels)
-                    
+                # Sound Trigger의 _to_mono_int16과 동일한 로직
+                usable_len = (len(audio_data) // channels) * channels
+                if usable_len != len(audio_data):
+                    audio_data = audio_data[:usable_len]
+                x = audio_data.reshape(-1, channels)
+                
                 # Channel 0만 사용 (ReSpeaker USB Mic Array의 후처리된 오디오)
                 mono = x[:, 0].astype(np.int16)
-                    audio_data = mono
+                audio_data = mono
                 
             # 샘플링 레이트 변환 (간단한 리샘플링)
             if framerate != SR:
@@ -561,6 +561,54 @@ class SoundSeparator:
             print(f"[Separator] Error saving separated audio: {e}")
             return None
     
+    def separate_audio(self, audio: np.ndarray, angle: int, max_passes: int = 3, on_pass_complete=None) -> List[Dict[str, Any]]:
+        """separator.py의 최신 멀티패스 음원 분리 로직을 직접 사용"""
+        # separator.py의 상수/클래스 import (이미 상단에서 import했다고 가정)
+        from separator import multi_pass_separation, ASTProcessor, SR, L_INPUT, L_MODEL
+
+        # 오디오 길이 맞추기 (4.096초/10.24초)
+        if len(audio) < L_INPUT:
+            audio_4sec = np.pad(audio, (0, L_INPUT - len(audio)))
+        else:
+            audio_4sec = audio[:L_INPUT]
+        if len(audio) < L_MODEL:
+            audio_10sec = np.pad(audio, (0, L_MODEL - len(audio)))
+        else:
+            audio_10sec = audio[:L_MODEL]
+
+        # ASTProcessor 인스턴스 생성 (CPU 고정)
+        ast_processor = ASTProcessor()
+
+        # separator.py의 멀티패스 분리 호출
+        results = multi_pass_separation(audio_4sec, audio_10sec, ast_processor, max_passes=max_passes)
+
+        # 결과 변환 및 후처리
+        separated_sources = []
+        for idx, result in enumerate(results):
+            # dB 계산 (원하면 기존 방식 활용)
+            db_min = db_max = db_mean = None
+            try:
+                db_min, db_max, db_mean = self._calculate_decibel_from_raw(result.separated_audio)
+            except Exception:
+                pass
+            source_info = {
+                'audio': result.separated_audio,
+                'class_name': result.classification['predicted_class'],
+                'sound_type': 'other',  # 필요시 분류
+                'confidence': result.classification['confidence'],
+                'class_id': -1,
+                'pass': idx + 1,
+                'db_min': db_min,
+                'db_max': db_max,
+                'db_mean': db_mean,
+                'occurred_at': None,
+                'separation_mask': result.mask
+            }
+            separated_sources.append(source_info)
+            if on_pass_complete:
+                on_pass_complete(source_info)
+        return separated_sources
+    
     def _separate_with_separator_py(self, audio: np.ndarray, max_passes: int = 3, on_pass_complete=None) -> List[Dict[str, Any]]:
         """
         separator.py의 single_pass 함수를 사용한 음원 분리
@@ -581,7 +629,7 @@ class SoundSeparator:
         
         # 중복 클래스 추적
         detected_classes = set()
-        silence_threshold = 0.01  # silence 감지 임계값
+        silence_threshold = 0.0001  # silence 감지 임계값 (Speech가 Silence로 잘못 감지되지 않도록 낮춤)
         
         # mel filterbank 생성 (separator.py와 동일)
         fbins = N_FFT//2 + 1
@@ -618,6 +666,16 @@ class SoundSeparator:
                 # separator.py의 single_pass는 (src_amp, res, er, None, info) 튜플을 반환
                 src_amp, res, er, _, info = result
                 
+                # 잔여 오디오 에너지 검사 - 의미없는 수준이면 패스 중단 (separator.py와 동일)
+                residual_energy = np.sum(res ** 2)
+                original_energy = np.sum(audio ** 2)
+                residual_ratio = residual_energy / (original_energy + 1e-10)
+                
+                # 에너지가 너무 낮거나 신뢰도가 너무 낮으면 중단 (separator.py와 동일)
+                if residual_ratio < 0.02 or info['confidence'] < 0.10:  # 잔여 에너지 2% 미만 또는 신뢰도 10% 미만
+                    print(f"[Separator] Pass {pass_idx + 1}: Stopping separation - Residual energy: {residual_ratio:.3f}, Confidence: {info['confidence']:.3f}")
+                    break
+                
                 # 분리된 오디오와 분류 정보 추출
                 separated_audio = src_amp  # 분리된 오디오
                 class_name = info.get('class_name', 'unknown')
@@ -631,19 +689,19 @@ class SoundSeparator:
                         print(f"[Separator] Pass {pass_idx + 1}: Invalid anchor detected (likely silence region), stopping separation")
                         return []
                     
-                    # Silence 감지 (RMS 기반)
-                    rms = np.sqrt(np.mean(separated_audio**2))
-                    if rms < silence_threshold:
-                        if pass_idx == 0:
-                            # 첫 번째 패스에서 silence 감지 시 즉시 종료
-                            print(f"[Separator] Pass {pass_idx + 1}: Silence detected in first pass (RMS: {rms:.6f}), stopping separation immediately")
-                            return []
-                        else:
-                            # 이후 패스에서 silence 감지 시 해당 패스만 건너뛰기
-                            print(f"[Separator] Pass {pass_idx + 1}: Silence detected (RMS: {rms:.6f}), skipping this pass")
-                            current_audio = res
-                            used_mask_prev = info.get('src_time_mask')
-                            continue
+                    # Silence 감지 (RMS 기반) - 비활성화
+                    # rms = np.sqrt(np.mean(separated_audio**2))
+                    # if rms < silence_threshold:
+                    #     if pass_idx == 0:
+                    #         # 첫 번째 패스에서 silence 감지 시 즉시 종료
+                    #         print(f"[Separator] Pass {pass_idx + 1}: Silence detected in first pass (RMS: {rms:.6f}), stopping separation immediately")
+                    #         return []
+                    #     else:
+                    #         # 이후 패스에서 silence 감지 시 해당 패스만 건너뛰기
+                    #         print(f"[Separator] Pass {pass_idx + 1}: Silence detected (RMS: {rms:.6f}), skipping this pass")
+                    #         current_audio = res
+                    #         used_mask_prev = info.get('src_time_mask')
+                    #         continue
                     
                     # 중복 클래스 확인
                     if class_name in detected_classes:
@@ -658,15 +716,24 @@ class SoundSeparator:
                     
                     # 소리 발생시간 계산 (separator.py와 동일한 로직)
                     occurred_at = None
-                    if 'separation_mask' in info and info['separation_mask'] is not None:
-                        from datetime import datetime, timedelta
-                        inference_start_time = datetime.utcnow()  # 실제로는 녹음 시작 시간 사용
-                        occurred_at = calculate_sound_occurrence_time(
-                            info['separation_mask'], 
-                            inference_start_time, 
-                            audio_duration=len(audio)/SR
-                        )
-                        print(f"  🕐 Sound occurrence time: {occurred_at}")
+                    if 'separation_mask' in info and info['separation_mask'] is not None and SEPARATOR_AVAILABLE:
+                        try:
+                            from datetime import datetime, timedelta
+                            inference_start_time = datetime.utcnow()  # 실제로는 녹음 시작 시간 사용
+                            occurred_at = calculate_sound_occurrence_time(
+                                info['separation_mask'], 
+                                inference_start_time, 
+                                audio_duration=len(audio)/SR
+                            )
+                            print(f"  🕐 Sound occurrence time: {occurred_at}")
+                        except NameError:
+                            # calculate_sound_occurrence_time 함수가 import되지 않은 경우
+                            from datetime import datetime
+                            occurred_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                            print(f"  🕐 Sound occurrence time (fallback): {occurred_at}")
+                    else:
+                        from datetime import datetime
+                        occurred_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
                     
                     source_info = {
                         'audio': separated_audio,
@@ -773,15 +840,24 @@ class SoundSeparator:
                         if source_info['sound_type'] != "other":
                             # 소리 발생시간 계산 (separator.py와 동일한 로직)
                             occurred_at = None
-                            if 'separation_mask' in source_info and source_info['separation_mask'] is not None:
-                                from datetime import datetime, timedelta
-                                inference_start_time = datetime.utcnow()  # 실제로는 녹음 시작 시간 사용
-                                occurred_at = calculate_sound_occurrence_time(
-                                    source_info['separation_mask'], 
-                                    inference_start_time, 
-                                    audio_duration=len(audio_normalized)/SR
-                                )
-                                print(f"  🕐 Sound occurrence time: {occurred_at}")
+                            if 'separation_mask' in source_info and source_info['separation_mask'] is not None and SEPARATOR_AVAILABLE:
+                                try:
+                                    from datetime import datetime, timedelta
+                                    inference_start_time = datetime.utcnow()  # 실제로는 녹음 시작 시간 사용
+                                    occurred_at = calculate_sound_occurrence_time(
+                                        source_info['separation_mask'], 
+                                        inference_start_time, 
+                                        audio_duration=len(audio_normalized)/SR
+                                    )
+                                    print(f"  🕐 Sound occurrence time: {occurred_at}")
+                                except NameError:
+                                    # calculate_sound_occurrence_time 함수가 import되지 않은 경우
+                                    from datetime import datetime
+                                    occurred_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                                    print(f"  🕐 Sound occurrence time (fallback): {occurred_at}")
+                            else:
+                                from datetime import datetime
+                                occurred_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
                             
                             print(f"[Separator] Sending separated source to backend: {source_info['class_name']} ({source_info['sound_type']})")
                             backend_success = self._send_to_backend(

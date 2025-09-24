@@ -14,6 +14,7 @@ import threading
 import queue
 import argparse
 from typing import Optional, Dict, Any, Set
+from datetime import datetime, timedelta
 
 # 파이프라인 모듈들 import
 from sound_trigger import SoundTrigger
@@ -111,8 +112,11 @@ class SingleSoundPipeline:
                     self.stats["total_detected"] += 1
                     print(f"\n🎵 Processing: {os.path.basename(recorded_file)}")
                     
+                    # 녹음 완료 시점 기록
+                    recording_end_time = datetime.utcnow()
+                    
                     # 2. 음원 분리 및 백엔드 전송
-                    separation_result = self._process_separation(recorded_file)
+                    separation_result = self._process_separation(recorded_file, recording_end_time)
                     
                     if separation_result["success"]:
                         separated_sources = separation_result.get("separated_sources", [])
@@ -125,7 +129,7 @@ class SingleSoundPipeline:
                 continue
     
     
-    def _process_separation(self, audio_file: str) -> Dict[str, Any]:
+    def _process_separation(self, audio_file: str, recording_end_time: datetime) -> Dict[str, Any]:
         """음원 분리 및 각 패스마다 백엔드 전송 (중복 클래스 전송 방지)"""
         try:
             # 1. Calculate DOA
@@ -152,18 +156,48 @@ class SingleSoundPipeline:
                 sound_type = source_info['sound_type']
                 pass_num = source_info.get('pass', 0)
                 
+                # 소리 발생시간 계산 (separator.py와 동일한 로직)
+                occurred_at = None
+                if 'separation_mask' in source_info and source_info['separation_mask'] is not None:
+                    try:
+                        # 녹음 끝난 시점 사용
+                        inference_start_time = recording_end_time
+                        audio_duration = len(audio_data) / 16000  # 16kHz 가정
+                        
+                        # separator.py의 calculate_sound_occurrence_time 함수 사용
+                        sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+                        from separator import calculate_sound_occurrence_time
+                        occurred_at = calculate_sound_occurrence_time(
+                            source_info['separation_mask'], 
+                            inference_start_time, 
+                            audio_duration=audio_duration
+                        )
+                        print(f"  🕐 Sound occurrence time: {occurred_at}")
+                    except Exception as e:
+                        print(f"  ⚠️ Sound occurrence time calculation failed: {e}")
+                        occurred_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                else:
+                    occurred_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                
                 # 현재 오디오 파일 내에서만 중복 클래스 체크
                 if class_name in self.current_sent_classes:
                     print(f"⏭️ SKIP: {class_name} ({sound_type}) - Duplicate")
                     self.stats["duplicate_skips"] += 1
                     return
                 
-                # 백엔드 전송
+                # 백엔드 전송 (other 타입 및 silence 클래스 제외)
                 backend_success = False
-                if self.backend_url:
-                    backend_success = self._send_to_backend(source_info, angle)
+                if self.backend_url and sound_type != "other" and class_name.lower() != "silence":
+                    # source_info에 occurred_at 추가
+                    source_info_with_time = source_info.copy()
+                    source_info_with_time['occurred_at'] = occurred_at
+                    backend_success = self._send_to_backend(source_info_with_time, angle)
                     if backend_success:
                         self.stats["backend_sends"] += 1
+                elif sound_type == "other":
+                    print(f"⏭️ SKIP: {class_name} ({sound_type}) - Backend send skipped for 'other' type")
+                elif class_name.lower() == "silence":
+                    print(f"⏭️ SKIP: {class_name} ({sound_type}) - Backend send skipped for 'silence' class")
                 
                 # LED 활성화
                 if self.led_controller:
@@ -178,14 +212,14 @@ class SingleSoundPipeline:
                 print(f"🎵 {class_name} ({sound_type}) - Backend: {backend_status}")
             
             # 분리 실행 (각 패스마다 즉시 처리)
-            separated_sources = self.sound_separator.separate_audio(audio_data, max_passes=3, on_pass_complete=on_pass_complete)
+            separated_sources = self.sound_separator.separate_audio(audio_data, angle, max_passes=2, on_pass_complete=on_pass_complete)
             
             if separated_sources:
                 print(f"✅ Separation completed: {len(separated_sources)} sources")
                 self.stats["successful_separations"] += 1
                 return {"success": True, "separated_sources": separated_sources}
             else:
-                print("❌ No sources separated")
+                print("❌ No sources separated (Silence detected or no valid sounds)")
                 return {"success": False, "error": "No sources separated"}
                 
         except Exception as e:

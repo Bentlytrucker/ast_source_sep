@@ -147,7 +147,7 @@ class SingleSoundPipeline:
                         audio_duration = len(audio_data) / 16000  # 16kHz 가정
                         
                         # separator.py의 calculate_sound_occurrence_time 함수 사용
-                        from sound_pipeline.separator import calculate_sound_occurrence_time
+                        from .separator import calculate_sound_occurrence_time
                         occurred_at = calculate_sound_occurrence_time(
                             source_info['separation_mask'], 
                             inference_start_time, 

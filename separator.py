@@ -51,13 +51,14 @@ class ASTConfig:
 
 class SeparationConfig:
     """분리 파라미터"""
-    SIMILARITY_THRESHOLD = 0.6  # 0.6 → 0.4로 낮춤 (더 많은 구간 분리)
-    WEAK_MASK_FACTOR = 0.1  # 0.1 → 0.3으로 증가 (약한 구간도 더 강하게)
+    SIMILARITY_THRESHOLD = 0.5  
+    WEAK_MASK_FACTOR = 0.1 
     MIN_ANCHOR_FRAMES = 8  # 최소 앵커 크기 (0.08초)
     MAX_ANCHOR_FRAMES = 128  # 최대 앵커 크기 (1.28초)
     CONTINUITY_GAP = 1  # 연속성 판단 최대 간격 (패치)
     ATTENTION_PERCENTILE = 80  # 상위 어텐션 퍼센타일
     MEDIUM_MASK_FACTOR = 0.6  # 중간 유사도 구간 마스크 강도
+    PURITY_PERCENTILE = 70  # 앵커 추출에 사용할 순수도 퍼센타일(시간 패치 기준)
 
 class WienerConfig:
     """Wiener 필터링 설정"""
@@ -163,7 +164,7 @@ class ASTProcessor:
         if attention_matrix.shape[1] > 1:
             attention_matrix[0, 1] *= 0.3  # 두 번째 시간 패치도 부분적으로 억제
         
-        print(f"    🔍 CLS/distillation token masking applied to attention matrix")
+        #print(f"    🔍 CLS/distillation token masking applied to attention matrix")
         
         # 분류 결과
         logits = outputs.logits
@@ -232,7 +233,7 @@ def calculate_distribution_similarity(template: np.ndarray, current: np.ndarray)
         emd_sim = np.exp(-emd / 10)
         emd_sim = np.clip(emd_sim, 0, 1)  # [0, 1] 범위 보장
     except Exception as e:
-        print(f"    ⚠️ EMD calculation failed: {e}, using fallback")
+        #print(f"    ⚠️ EMD calculation failed: {e}, using fallback")
         # EMD 실패 시 대안: L1 거리 기반 유사도
         l1_distance = np.sum(np.abs(template_norm - current_norm))
         emd_sim = np.exp(-l1_distance)
@@ -270,7 +271,7 @@ def select_best_patch(stft_mag: np.ndarray, anchor_start: int, anchor_end: int,
     best_patch_end = min(anchor_start + (best_patch_idx + 1) * patch_size, anchor_end)
     best_patch_spec = stft_mag[:, best_patch_start:best_patch_end]
     
-    print(f"    🔍 Selected best patch {best_patch_idx}/{num_patches} (energy: {patch_energies[best_patch_idx]:.3f})")
+    #print(f"    🔍 Selected best patch {best_patch_idx}/{num_patches} (energy: {patch_energies[best_patch_idx]:.3f})")
     
     return best_patch_spec, best_patch_start, best_patch_end
 
@@ -319,13 +320,10 @@ def find_attention_anchor(
     previous_peaks: List[Tuple[int, int]],
     audio_length: int
 ) -> Tuple[int, int, bool]:
-    """완전히 유동적인 앵커 선정 - 어텐션 매트릭스에서 연속적인 부분만"""
+    """완전히 유동적인 앵커 선정 - 어텐션 매트릭스에서 연속적인 부분만 """
     num_freq_patches, num_time_patches = attention_matrix.shape
     max_frames = audio_length // HOP
     valid_patches = int(INPUT_SEC / MODEL_SEC * num_time_patches)
-    
-    print(f"    🔍 Anchor selection: {num_freq_patches}x{num_time_patches} attention matrix")
-    print(f"    🔍 Valid patches for 4.096s: {valid_patches}/{num_time_patches}")
     
     # 1. 억제된 영역 마스킹
     att_masked = attention_matrix.copy()
@@ -333,28 +331,18 @@ def find_attention_anchor(
         start_patch = int(start * num_time_patches / (L_MODEL // HOP))
         end_patch = int(end * num_time_patches / (L_MODEL // HOP))
         att_masked[:, max(0, start_patch):min(num_time_patches, end_patch)] *= 0.05
-        print(f"    🔍 Suppressed region: patches {start_patch}-{end_patch}")
     
     # 2. 이전 패스의 상위 어텐션 영역 약화 (더 관대하게)
     if previous_peaks:
         for start, end in previous_peaks:
-            # 0.3 → 0.5로 더 완화 (연속 구간을 찾을 수 있도록)
             att_masked[:, max(0, start):min(num_time_patches, end)] *= 0.5
-            print(f"    🔍 Weakened previous peak: patches {start}-{end} (factor: 0.5)")
     
     # 3. 4.096초 범위 내에서만 탐색
     att_masked[:, valid_patches:] = 0
     
     # 4. 주파수 영역별 연속적인 활성화 구간 찾기
-    print(f"    🔍 Finding continuous frequency-time attention regions...")
-    
-    # 각 주파수별로 높은 어텐션 영역 식별
     num_freq_patches = att_masked.shape[0]
     attention_threshold = np.percentile(att_masked, SeparationConfig.ATTENTION_PERCENTILE)
-    
-    print(f"    🔍 Attention threshold: {attention_threshold:.4f}")
-    
-    # 주파수별 활성화 마스크 생성
     freq_activation_maps = []
     for freq_idx in range(num_freq_patches):
         freq_attention = att_masked[freq_idx, :valid_patches]
@@ -363,113 +351,64 @@ def find_attention_anchor(
     
     # 5. 주파수 영역별 연속 구간 찾기
     frequency_segments = []
-    
     for freq_idx, activation_map in enumerate(freq_activation_maps):
         if not np.any(activation_map):
             continue
-            
-        # 해당 주파수에서 연속적인 시간 구간 찾기
         high_indices = np.where(activation_map)[0]
-        
-        # 연속 구간 그룹화
         continuous_segments = []
         current_segment = [high_indices[0]]
-        
         for i in range(1, len(high_indices)):
             if high_indices[i] - high_indices[i-1] <= SeparationConfig.CONTINUITY_GAP:
                 current_segment.append(high_indices[i])
             else:
-                if len(current_segment) >= 2:  # 최소 2 패치 이상
+                if len(current_segment) >= 2:
                     continuous_segments.append((freq_idx, current_segment))
                 current_segment = [high_indices[i]]
-        
-        # 마지막 구간 추가
         if len(current_segment) >= 2:
             continuous_segments.append((freq_idx, current_segment))
-        
         frequency_segments.extend(continuous_segments)
     
-    print(f"    🔍 Found {len(frequency_segments)} frequency-time segments")
-    
-    # 6. 주파수 영역별 연속성 점수 계산
+    # 6. 연속 구간 중 어텐션 최대값이 더 높은 구간을 앵커로 선택
     best_segment = None
     best_freq_idx = None
-    best_score = -1
-    
+    best_max_att = -1
     for freq_idx, segment in frequency_segments:
-        # 해당 주파수-시간 구간의 평균 어텐션
-        segment_attention = np.mean([att_masked[freq_idx, i] for i in segment])
-        
-        # 점수 = 길이 × 평균 어텐션 × 주파수 가중치
-        # 저주파(0-3)와 고주파(8-11)에 더 높은 가중치
-        freq_weight = 1.0
-        if freq_idx <= 3:  # 저주파
-            freq_weight = 1.2
-        elif freq_idx >= 8:  # 고주파
-            freq_weight = 1.1
-        
-        score = len(segment) * segment_attention * freq_weight
-        
-        print(f"    🔍 Freq {freq_idx}, Time {segment[0]}-{segment[-1]}: length={len(segment)}, attention={segment_attention:.4f}, score={score:.4f}")
-        
-        if score > best_score:
-            best_score = score
+        max_att = np.max([att_masked[freq_idx, i] for i in segment])
+        if max_att > best_max_att:
+            best_max_att = max_att
             best_segment = segment
             best_freq_idx = freq_idx
-    
     if best_segment is None:
-        print(f"    ⚠️ No valid continuous segment found, using max attention fallback")
-        # 폴백: 전체 어텐션 매트릭스에서 최대 어텐션 위치 찾기
         max_freq_idx, max_time_idx = np.unravel_index(np.argmax(att_masked), att_masked.shape)
-        # 최대 어텐션 주변 3-5 패치를 앵커로 설정
-        anchor_size = min(5, valid_patches // 8)  # 최대 5패치 또는 전체의 1/8
+        anchor_size = min(5, valid_patches // 8)
         start_patch = max(0, max_time_idx - anchor_size // 2)
         end_patch = min(valid_patches, start_patch + anchor_size)
         best_segment = list(range(start_patch, end_patch))
-        best_freq_idx = max_freq_idx  # 폴백에서도 주파수 정보 보존
-        print(f"    🔍 Fallback anchor: patches {start_patch}-{end_patch-1} (max attention at freq {max_freq_idx}, time {max_time_idx})")
-    
-    # 7. 앵커 구간을 연속적인 어텐션 길이에 맞춰 설정 (완전 유동적)
+        best_freq_idx = max_freq_idx
     anchor_start_patch = best_segment[0]
-    anchor_end_patch = best_segment[-1] + 1  # +1로 패치 끝까지 포함
-    
-    # 패치를 프레임으로 변환
+    anchor_end_patch = best_segment[-1] + 1
     anchor_start = int(anchor_start_patch * max_frames / valid_patches)
     anchor_end = int(anchor_end_patch * max_frames / valid_patches)
-    
-    # 경계 검증
     anchor_start, anchor_end = validate_anchor_bounds(anchor_start, anchor_end, max_frames)
-    
     actual_anchor_size = anchor_end - anchor_start
-    actual_anchor_time = actual_anchor_size * HOP / SR
-    
-    print(f"    🔍 Selected continuous segment: {len(best_segment)} patches")
-    print(f"    🔍 Dynamic anchor: {actual_anchor_size} frames ({actual_anchor_time:.3f}s)")
-    print(f"    🔍 Anchor range: {anchor_start}-{anchor_end} frames")
-    print(f"    🔍 Time range: {anchor_start*HOP/SR:.3f}s - {anchor_end*HOP/SR:.3f}s")
-    
-    # 8. 크기 제한 적용
     min_frames = SeparationConfig.MIN_ANCHOR_FRAMES
     max_frames_limit = SeparationConfig.MAX_ANCHOR_FRAMES
-    
     if actual_anchor_size < min_frames:
         center = (anchor_start + anchor_end) // 2
         anchor_start = max(0, center - min_frames // 2)
         anchor_end = min(max_frames, anchor_start + min_frames)
-        print(f"    ⚠️ Expanded to minimum size: {anchor_end - anchor_start} frames")
     elif actual_anchor_size > max_frames_limit:
         center = (anchor_start + anchor_end) // 2
         anchor_start = max(0, center - max_frames_limit // 2)
         anchor_end = min(max_frames, anchor_start + max_frames_limit)
-        print(f"    ⚠️ Limited to maximum size: {anchor_end - anchor_start} frames")
-    
     return anchor_start, anchor_end, True, best_freq_idx
 
 # ==================== 템플릿 기반 마스킹 ====================
 def create_template_mask(
     stft_mag: np.ndarray,
     anchor_frames: Tuple[int, int],
-    attention_weights: Optional[np.ndarray] = None
+    attention_weights: Optional[np.ndarray] = None,
+    anchor_freq_indices: Optional[List[int]] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """템플릿 기반 분포 유사도 마스킹 - 수정 버전"""
     anchor_start, anchor_end = anchor_frames
@@ -485,7 +424,7 @@ def create_template_mask(
     anchor_spec = stft_mag[:, anchor_start:anchor_end]
     actual_anchor_size = anchor_end - anchor_start
     
-    print(f"    🔍 Using dynamic anchor region: {actual_anchor_size} frames ({actual_anchor_size * HOP / SR:.3f}s)")
+    #print(f"    🔍 Using dynamic anchor region: {actual_anchor_size} frames ({actual_anchor_size * HOP / SR:.3f}s)")
     
     # 앵커 크기에 따라 적응적 패치 크기 결정
     patch_size = calculate_patch_size(actual_anchor_size)
@@ -495,55 +434,43 @@ def create_template_mask(
         best_patch_spec = anchor_spec
         best_patch_start = anchor_start
         best_patch_end = anchor_end
-        print(f"    🔍 Small anchor: using entire region ({actual_anchor_size} frames)")
+        #print(f"    🔍 Small anchor: using entire region ({actual_anchor_size} frames)")
     else:
         # 중간/큰 앵커: 패치로 나누기
         num_patches = max(1, actual_anchor_size // patch_size)
         best_patch_spec, best_patch_start, best_patch_end = select_best_patch(
             stft_mag, anchor_start, anchor_end, patch_size, num_patches
         )
-        print(f"    🔍 Anchor: selected best {patch_size}-frame patch from {num_patches} patches")
+        #print(f"    🔍 Anchor: selected best {patch_size}-frame patch from {num_patches} patches")
     
     # === 수정 2: 어텐션 매트릭스와 진폭 강조된 주파수 이용한 템플릿 생성 ===
     
     # 1. 기본 템플릿 (유동적 크기 패치의 평균)
     base_template = np.mean(best_patch_spec, axis=1)
     actual_patch_size = best_patch_spec.shape[1]
-    print(f"    🔍 Template from {actual_patch_size}-frame patch ({actual_patch_size * HOP / SR:.3f}s)")
+    #print(f"    🔍 Template from {actual_patch_size}-frame patch ({actual_patch_size * HOP / SR:.3f}s)")
     
-    # 2. 어텐션 매트릭스에서 해당 구간의 주파수 가중치 추출 (개선)
-    attention_weights = np.ones(len(base_template))  # 기본값
-    if attention_weights is not None and len(attention_weights.shape) > 1:
-        # 앵커 구간에 해당하는 어텐션 패치들
-        num_time_patches = attention_weights.shape[1]
-        patch_start_attention = int(best_patch_start * num_time_patches / stft_mag.shape[1])
-        patch_end_attention = int(best_patch_end * num_time_patches / stft_mag.shape[1])
-        patch_start_attention = max(0, min(num_time_patches-1, patch_start_attention))
-        patch_end_attention = max(0, min(num_time_patches, patch_end_attention))
-        
-        print(f"    🔍 Attention patch range: {patch_start_attention}-{patch_end_attention} (out of {num_time_patches})")
-        
-        # 해당 구간에서의 주파수별 어텐션 평균 (더 정확한 매핑)
-        patch_attention_freq = np.mean(attention_weights[:, patch_start_attention:patch_end_attention], axis=1)
-        
-        # 어텐션 패치를 STFT 주파수 빈으로 매핑 (개선된 매핑)
-        num_attention_freq_patches = attention_weights.shape[0]
-        stft_freq_bins = len(base_template)
-        
-        print(f"    🔍 Mapping {num_attention_freq_patches} attention patches to {stft_freq_bins} STFT bins")
-        
-        for i in range(stft_freq_bins):
-            # 더 정확한 매핑: STFT 주파수 빈을 어텐션 패치로 변환
-            attention_patch_idx = int(i * num_attention_freq_patches / stft_freq_bins)
-            attention_patch_idx = min(attention_patch_idx, num_attention_freq_patches - 1)
-            attention_weights[i] = patch_attention_freq[attention_patch_idx]
-        
-        # 어텐션 가중치 정규화 및 강화
-        attention_weights = np.maximum(attention_weights, 0.1)  # 최소값 보장
-        attention_weights = attention_weights / (np.max(attention_weights) + 1e-8)  # 정규화
-        
-        print(f"    🔍 Attention weights range: {attention_weights.min():.3f} - {attention_weights.max():.3f}")
-        print(f"    🔍 High attention frequencies: {np.sum(attention_weights > 0.7)}/{len(attention_weights)}")
+    # 2. 어텐션 맵을 STFT 해상도로 직접 보간하여 사용 (시각화와 동일 방향)
+    attention_weights_mapped = np.ones(len(base_template))  # 기본값
+    att_2d_resampled = None
+    if attention_weights is not None and len(attention_weights.shape) == 2:
+        num_freq_patches, num_time_patches = attention_weights.shape
+        valid_patches = int(INPUT_SEC / MODEL_SEC * num_time_patches)
+        att_crop = attention_weights[:, :valid_patches]
+        from scipy.ndimage import zoom as _zoom
+        freq_zoom = stft_mag.shape[0] / att_crop.shape[0]
+        time_zoom = stft_mag.shape[1] / att_crop.shape[1] if att_crop.shape[1] > 0 else 1.0
+        att_2d_resampled = _zoom(att_crop, (freq_zoom, time_zoom), order=1)
+        att_2d_resampled = att_2d_resampled[:stft_mag.shape[0], :stft_mag.shape[1]]
+        # 앵커 시간대 평균 주파수 프로파일
+        patch_start_attention = int(best_patch_start * att_2d_resampled.shape[1] / stft_mag.shape[1])
+        patch_end_attention = int(best_patch_end * att_2d_resampled.shape[1] / stft_mag.shape[1])
+        patch_start_attention = max(0, min(att_2d_resampled.shape[1]-1, patch_start_attention))
+        patch_end_attention = max(0, min(att_2d_resampled.shape[1], patch_end_attention))
+        freq_profile = np.mean(att_2d_resampled[:, patch_start_attention:patch_end_attention], axis=1)
+        freq_profile = np.maximum(freq_profile, 0)
+        attention_weights_mapped = freq_profile / (np.max(freq_profile) + 1e-8)
+        #print(f"    🔍 Direct attention→STFT mapping used (bilinear). Range: {attention_weights_mapped.min():.3f}-{attention_weights_mapped.max():.3f}")
     
     # 3. 진폭 강조된 주파수 식별
     amplitude_threshold = np.percentile(base_template, 75)  # 상위 25%
@@ -553,36 +480,101 @@ def create_template_mask(
     template = base_template.copy()
     
     # 어텐션 가중치 강화 적용 (더 강한 반영)
-    attention_factor = 0.3 + 0.7 * attention_weights  # 0.3~1.0 범위
+    attention_factor = 0.3 + 0.7 * attention_weights_mapped  # 0.3~1.0 범위
     template *= attention_factor
     
     # 진폭 강조된 주파수 추가 강화
     template[amplitude_mask] *= 1.8  # 1.5 → 1.8로 증가
     
     # 어텐션과 진폭이 모두 높은 주파수 특별 강화
-    high_attention_mask = attention_weights > 0.7
+    high_attention_mask = attention_weights_mapped > 0.7
     combined_mask = amplitude_mask & high_attention_mask
     template[combined_mask] *= 2.0  # 어텐션+진폭 모두 높은 주파수 2배 강화
     
-    print(f"    🔍 Template enhancement: attention factor range {attention_factor.min():.3f}-{attention_factor.max():.3f}")
-    print(f"    🔍 Amplitude-emphasized frequencies: {np.sum(amplitude_mask)}")
-    print(f"    🔍 High attention frequencies: {np.sum(high_attention_mask)}")
-    print(f"    🔍 Combined high attention+amplitude: {np.sum(combined_mask)}")
+    # 4. 선정된 앵커의 주파수들에 어텐션 값에 비례한 가중치 적용
+    if att_2d_resampled is not None:
+        # 어텐션 2D로 앵커 시간대 평균을 주파수 마스크로 직접 사용
+        anchor_start_t = max(0, min(att_2d_resampled.shape[1]-1, best_patch_start))
+        anchor_end_t = max(0, min(att_2d_resampled.shape[1], best_patch_end))
+        anchor_freq_vals = np.mean(att_2d_resampled[:, anchor_start_t:anchor_end_t], axis=1)
+        anchor_freq_vals = anchor_freq_vals / (np.max(anchor_freq_vals) + 1e-8)
+        anchor_freq_mask = 1.0 + anchor_freq_vals
+        #print(f"    🔍 Anchor freq mask from direct attention (range: {anchor_freq_vals.min():.3f}-{anchor_freq_vals.max():.3f})")
+    elif anchor_freq_indices is not None and len(anchor_freq_indices) > 0 and attention_weights is not None:
+        # AST frequency patch → STFT frequency bins 정확한 매핑
+        # Mel frequency → STFT frequency 매핑
+        mel_freqs = librosa.mel_frequencies(n_mels=128, fmin=0, fmax=SR//2)
+        stft_freqs = librosa.fft_frequencies(sr=SR, n_fft=STFTConfig.N_FFT)
+        
+        # 앵커 구간에서의 어텐션 값들 추출 (주파수 축 반전 적용)
+        anchor_start_patch = int(best_patch_start * attention_weights.shape[1] / stft_mag.shape[1])
+        anchor_end_patch = int(best_patch_end * attention_weights.shape[1] / stft_mag.shape[1])
+        attention_weights_flipped = attention_weights[::-1, :]
+        anchor_attention_values = np.mean(attention_weights_flipped[:, anchor_start_patch:anchor_end_patch], axis=1)
+        
+        for anchor_freq_idx in anchor_freq_indices:
+            # AST patch → STFT frequency bins 직접 매핑 (실제 주파수 기반)
+            # AST: 12 patches, STFT: 201 bins
+            # 각 AST 패치가 차지하는 STFT 빈 범위를 직접 계산
+            
+            # AST 패치당 STFT 빈 개수
+            stft_bins_per_patch = len(template) // 12  # STFT bins per AST patch
+            
+            # AST 패치에 해당하는 STFT 빈 범위 (시각화와 동일 방향: 저주파→고주파)
+            # find_attention_anchor에서 얻은 anchor_freq_idx를 시각화 방향에 맞추기 위해 반전
+            num_attention_freq_patches = 12
+            vis_idx = num_attention_freq_patches - 1 - anchor_freq_idx
+            stft_start_idx = int(vis_idx * stft_bins_per_patch)
+            stft_end_idx = int((vis_idx + 1) * stft_bins_per_patch)
+            stft_end_idx = min(stft_end_idx, len(template))
+            
+            # 어텐션 값에 비례한 가중치 적용 (1.0 + 어텐션값)
+            attention_weight = 1.0 + anchor_attention_values[vis_idx]
+            template[stft_start_idx:stft_end_idx] *= attention_weight
+            
+            # # 디버그: 실제 주파수 범위와 STFT 빈 인덱스 출력
+            # print(f"    🔍 Template anchor frequency boost: AST patch {anchor_freq_idx}")
+            # print(f"        → STFT bins {stft_start_idx}-{stft_end_idx-1}")
+            # print(f"        → STFT frequency range: {stft_freqs[stft_start_idx]:.1f}-{stft_freqs[stft_end_idx-1]:.1f} Hz")
+            # print(f"        → Attention: {anchor_attention_values[anchor_freq_idx]:.3f}, Weight: {attention_weight:.3f}")
+        
+        # print(f"    🔍 Total anchor frequency patches boosted: {len(anchor_freq_indices)}")
+        # print(f"    🔍 Template attention weight range: {anchor_attention_values.min():.3f} - {anchor_attention_values.max():.3f}")
+    
+    # 5. 앵커 안 스펙트로그램에서 강한 진폭을 가진 상위 20% 추출 (진폭 기반)
+    if best_patch_start < best_patch_end:
+        # 앵커 패치의 평균 스펙트로그램
+        patch_mean_spec = np.mean(best_patch_spec, axis=1)
+        
+        # 상위 20% 진폭 임계값
+        amplitude_threshold = np.percentile(patch_mean_spec, 80)  # 상위 20%
+        high_amplitude_mask = patch_mean_spec >= amplitude_threshold
+        
+        # 상위 20% 진폭 주파수에만 2.0배 가중치 적용
+        template[high_amplitude_mask] *= 2.0
+        
+    #     print(f"    🔍 Template amplitude boost: {np.sum(high_amplitude_mask)}/{len(high_amplitude_mask)} high amplitude bins (top 20%)")
+    #     print(f"    🔍 Template amplitude threshold: {amplitude_threshold:.6f}")
+    
+    # print(f"    🔍 Template enhancement: attention factor range {attention_factor.min():.3f}-{attention_factor.max():.3f}")
+    # print(f"    🔍 Amplitude-emphasized frequencies: {np.sum(amplitude_mask)}")
+    # print(f"    🔍 High attention frequencies: {np.sum(high_attention_mask)}")
+    # print(f"    🔍 Combined high attention+amplitude: {np.sum(combined_mask)}")
     
     # 템플릿 정규화 (양수 보장)
     template = np.maximum(template, 1e-8)
     template_norm = template / (np.sum(template) + 1e-8)
     
-    print(f"    🔍 Template created: {len(template)} frequency bins, energy: {np.sum(template**2):.3f}")
-    print(f"    🔍 Template time span: {actual_patch_size} frames ({actual_patch_size * HOP / SR:.3f}s)")
-    print(f"    🔍 Attention-weighted template with {np.sum(amplitude_mask)}/{len(template)} amplitude-emphasized frequencies")
+    # print(f"    🔍 Template created: {len(template)} frequency bins, energy: {np.sum(template**2):.3f}")
+    # print(f"    🔍 Template time span: {actual_patch_size} frames ({actual_patch_size * HOP / SR:.3f}s)")
+    # print(f"    🔍 Attention-weighted template with {np.sum(amplitude_mask)}/{len(template)} amplitude-emphasized frequencies")
     
     # === 수정 3: 유동적 크기 템플릿 기반 유사도 계산 ===
     num_frames = stft_mag.shape[1]
     similarity = np.zeros(num_frames)
     
-    print(f"    🔍 Computing similarity for {num_frames} frames using {actual_patch_size}-frame template")
-    print(f"    🔍 Template represents minimal time pattern for continuous comparison")
+    # print(f"    🔍 Computing similarity for {num_frames} frames using {actual_patch_size}-frame template")
+    # print(f"    🔍 Template represents minimal time pattern for continuous comparison")
     
     for t in range(num_frames):
         current = stft_mag[:, t]
@@ -635,46 +627,109 @@ def create_template_mask(
     #     similarity[anchor_start:anchor_end], 0.95
     # )
     
-    # === 수정 5: 2D 마스크 생성 ===
+    # === 수정 5: 2D 마스크 생성 (앵커 주파수 직접 반영) ===
     mask = np.zeros_like(stft_mag)
     
-    for t in range(num_frames):
-        if similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD:
-            # 높은 유사도: 매우 강하게 분리
-            mask[:, t] = similarity[t] * 1.8  # 80% 추가 강화
-        elif similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD * 0.7:
-            # 중간-높은 유사도: 강하게 분리
-            mask[:, t] = similarity[t] * 1.2  # 20% 추가 강화
-        elif similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD * 0.4:
-            # 중간 유사도: 보통 강도
-            mask[:, t] = similarity[t] * 0.6
-        elif similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD * 0.2:
-            # 낮은 유사도: 아주 약하게 분리
-            mask[:, t] = similarity[t] * 0.15
-    else:
-            # 매우 낮은 유사도: 거의 분리하지 않음
-            mask[:, t] = similarity[t] * 0.05
-    
-    # === 수정 6: 주파수별 가중치 적용 및 원본 진폭 제한 ===
-    if anchor_spec.size > 0:
-        # 앵커에서 중요한 주파수 식별 (더 강한 가중치)
-        freq_importance = np.percentile(anchor_spec, 80, axis=1)  # 80 percentile로 상향
-        freq_importance = freq_importance / (np.max(freq_importance) + 1e-8)
+    # 1. 앵커 선정 시 참고한 특정 패치들의 주파수만 강조 (어텐션 기반)
+    anchor_freq_mask = np.ones(stft_mag.shape[0])  # 기본값 1.0
+    if anchor_freq_indices is not None and len(anchor_freq_indices) > 0 and attention_weights is not None:
+        # AST frequency patch → STFT frequency bins 정확한 매핑
+        # AST: 128 mel bins → 12 patches (patch size=16, stride=10)
+        # STFT: 201 bins (N_FFT=400)
         
-        # 중요 주파수 강조 (어텐션 기반 가중치 적용)
-        for f in range(mask.shape[0]):
-            # 기본 중요도 가중치
-            importance_factor = 0.5 + 1.0 * freq_importance[f]
+        # Mel frequency → STFT frequency 매핑
+        mel_freqs = librosa.mel_frequencies(n_mels=128, fmin=0, fmax=SR//2)
+        stft_freqs = librosa.fft_frequencies(sr=SR, n_fft=STFTConfig.N_FFT)
+        
+        # 앵커 구간에서의 어텐션 값들 추출 (주파수 축 반전 적용)
+        anchor_start_patch = int(anchor_start * attention_weights.shape[1] / stft_mag.shape[1])
+        anchor_end_patch = int(anchor_end * attention_weights.shape[1] / stft_mag.shape[1])
+        attention_weights_flipped = attention_weights[::-1, :]
+        anchor_attention_values = np.mean(attention_weights_flipped[:, anchor_start_patch:anchor_end_patch], axis=1)
+        
+        # 앵커 선정 시 참고한 특정 패치들의 주파수만 강조
+        for anchor_freq_idx in anchor_freq_indices:
+            # AST patch → STFT frequency bins 직접 매핑 (실제 주파수 기반)
+            # AST: 12 patches, STFT: 201 bins
+            # 각 AST 패치가 차지하는 STFT 빈 범위를 직접 계산
             
-            # 어텐션 가중치 추가 (해당 주파수가 어텐션에서 높은 경우)
-            if f < len(attention_weights):
-                attention_factor = 0.8 + 0.4 * attention_weights[f]  # 0.8~1.2 범위
+            # AST 패치당 STFT 빈 개수
+            stft_bins_per_patch = stft_mag.shape[0] // 12  # 201 // 12 ≈ 16.75
+            
+            # AST 패치에 해당하는 STFT 빈 범위 (시각화와 동일 방향: 저주파→고주파)
+            num_attention_freq_patches = 12
+            vis_idx = num_attention_freq_patches - 1 - anchor_freq_idx
+            stft_start_idx = int(vis_idx * stft_bins_per_patch)
+            stft_end_idx = int((vis_idx + 1) * stft_bins_per_patch)
+            stft_end_idx = min(stft_end_idx, stft_mag.shape[0])
+            
+            # 어텐션 값에 비례한 가중치 적용 (1.0 + 어텐션값)
+            attention_weight = 1.0 + anchor_attention_values[vis_idx]
+            anchor_freq_mask[stft_start_idx:stft_end_idx] = attention_weight
+            
+        #     # 디버그: 실제 주파수 범위와 STFT 빈 인덱스 출력
+        #     print(f"    🔍 Anchor frequency mask: AST patch {anchor_freq_idx}")
+        #     print(f"        → STFT bins {stft_start_idx}-{stft_end_idx-1}")
+        #     print(f"        → STFT frequency range: {stft_freqs[stft_start_idx]:.1f}-{stft_freqs[stft_end_idx-1]:.1f} Hz")
+        #     print(f"        → Attention: {anchor_attention_values[anchor_freq_idx]:.3f}, Weight: {attention_weight:.3f}")
+        
+        # print(f"    🔍 Total activated frequency patches: {len(anchor_freq_indices)}")
+        # print(f"    🔍 Attention weight range: {anchor_attention_values.min():.3f} - {anchor_attention_values.max():.3f}")
+    
+    # 2. 앵커 안 스펙트로그램에서 강한 진폭을 가진 상위 20% 추출 (진폭 기반)
+    anchor_amplitude_mask = np.ones(stft_mag.shape[0])  # 기본값 1.0
+    if anchor_start < anchor_end:
+        # 앵커 구간의 평균 스펙트로그램
+        anchor_spec = stft_mag[:, anchor_start:anchor_end]
+        anchor_mean_spec = np.mean(anchor_spec, axis=1)
+        
+        # 상위 20% 진폭 임계값
+        amplitude_threshold = np.percentile(anchor_mean_spec, 80)  # 상위 20%
+        high_amplitude_mask = anchor_mean_spec >= amplitude_threshold
+        
+        # 상위 20% 진폭 주파수에만 2.0배 가중치 적용
+        anchor_amplitude_mask[high_amplitude_mask] = 2.0
+        
+        # print(f"    🔍 Anchor amplitude mask: {np.sum(high_amplitude_mask)}/{len(high_amplitude_mask)} high amplitude bins (top 20%)")
+        # print(f"    🔍 Amplitude threshold: {amplitude_threshold:.6f}")
+    
+    for t in range(num_frames):
+        # 시간별 유사도 기반 기본 강도
+        if similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD:
+            base_strength = similarity[t] * 1.8
+        elif similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD * 0.7:
+            base_strength = similarity[t] * 1.2
+        elif similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD * 0.4:
+            base_strength = similarity[t] * 0.6
+        elif similarity[t] >= SeparationConfig.SIMILARITY_THRESHOLD * 0.2:
+            base_strength = similarity[t] * 0.15
+        else:
+            base_strength = similarity[t] * 0.05
+        
+        # 주파수별 가중치 적용 (앵커 주파수 + 진폭 기반)
+        for f in range(stft_mag.shape[0]):
+            # 1. 앵커 주파수 가중치 (어텐션 기반 - 특정 패치들만)
+            anchor_attention_weight = anchor_freq_mask[f]
+            
+            # 2. 앵커 진폭 가중치 (진폭 기반 - 상위 20%만)
+            anchor_amplitude_weight = anchor_amplitude_mask[f]
+            
+            # 3. 어텐션 가중치
+            if att_2d_resampled is not None:
+                att_val = att_2d_resampled[f, min(t, att_2d_resampled.shape[1]-1)]
+                # 전역 정규화
+                att_val = att_val / (np.max(att_2d_resampled) + 1e-8)
+                general_attention_weight = 0.8 + 0.4 * att_val
             else:
-                attention_factor = 1.0
+                if f < len(attention_weights_mapped):
+                    general_attention_weight = 0.8 + 0.4 * attention_weights_mapped[f]
+                else:
+                    general_attention_weight = 1.0
             
-            # 최종 가중치 = 중요도 × 어텐션
-            weight_factor = importance_factor * attention_factor
-            mask[f, :] *= weight_factor
+            # 최종 마스크 값 = 기본 강도 × 앵커 어텐션 가중치 × 앵커 진폭 가중치 × 일반 어텐션 가중치
+            mask[f, t] = base_strength * anchor_attention_weight * anchor_amplitude_weight * general_attention_weight
+    
+    # === 수정 6: 원본 진폭 제한 ===
         
         # 원본 오디오 진폭 제한: 마스크가 원본을 넘지 않도록
         # 각 시간 프레임별로 원본 스펙트로그램 대비 마스크 강도 제한
@@ -690,14 +745,18 @@ def create_template_mask(
                     scale_factor = np.sqrt(original_energy * max_energy_ratio / current_masked_energy)
                     mask[:, t] *= scale_factor
                     
-                    print(f"    🔧 Frame {t}: Energy limited to {max_energy_ratio*100}% of original")
+                    #print(f"    🔧 Frame {t}: Energy limited to {max_energy_ratio*100}% of original")
         
-        print(f"    📊 Frequency weighting applied: {np.sum(freq_importance > 0.5)}/{len(freq_importance)} important bins")
+        #print(f"    📊 Frequency weighting applied: {np.sum(anchor_freq_mask > 1.0)}/{len(anchor_freq_mask)} anchor frequency bins")
     
     # 최종 정규화 및 스무딩 (주파수와 시간 모두)
     mask = apply_smoothing_filters(mask, is_2d=True)
+
+    # 주파수 축 상하 반전 (시각화 기준 위/아래 뒤집기)
+    mask = mask[::-1, :]
     
-    print(f"    🔍 Enhanced smoothing applied: frequency axis (σ=1.5), time axis (σ=1.0), 2D (σ=0.8,0.6)")
+    # print(f"    🔍 Enhanced smoothing applied: frequency axis (σ=1.5), time axis (σ=1.0), 2D (σ=0.8,0.6)")
+    # print(f"    🔄 Mask frequency axis flipped (up/down)")
     
     return mask, similarity
 
@@ -744,9 +803,9 @@ def apply_adaptive_wiener(
     # 6. 최종 클리핑
     enhanced_wiener_gain = np.clip(enhanced_wiener_gain, 0, 1)
     
-    print(f"    🔍 Wiener filtering: tanh/sigmoid intensity applied")
-    print(f"    🔍 Intensity range: {final_intensity.min():.3f} - {final_intensity.max():.3f}")
-    print(f"    🔍 Anchor boost: {WienerConfig.ANCHOR_BOOST}x")
+    # print(f"    🔍 Wiener filtering: tanh/sigmoid intensity applied")
+    # print(f"    🔍 Intensity range: {final_intensity.min():.3f} - {final_intensity.max():.3f}")
+    # print(f"    🔍 Anchor boost: {WienerConfig.ANCHOR_BOOST}x")
     
     return stft * enhanced_wiener_gain
 
@@ -770,7 +829,7 @@ def process_single_pass(
     stft, mag, phase = compute_stft(audio_4sec)
     
     # 앵커 선정
-    anchor_start, anchor_end, is_valid, anchor_freq_idx = find_attention_anchor(
+    anchor_start, anchor_end, is_valid, anchor_freq_indices = find_attention_anchor(
         attention_matrix, suppressed_regions, previous_peaks, len(audio_4sec)
     )
     
@@ -778,10 +837,10 @@ def process_single_pass(
         return None
     
     anchor_time = (anchor_start * HOP / SR, anchor_end * HOP / SR)
-    print(f"  앵커: {anchor_time[0]:.3f}s - {anchor_time[1]:.3f}s")
+    #print(f"  앵커: {anchor_time[0]:.3f}s - {anchor_time[1]:.3f}s")
     
     # 템플릿 마스킹
-    mask, similarity = create_template_mask(mag, (anchor_start, anchor_end), attention_matrix)
+    mask, similarity = create_template_mask(mag, (anchor_start, anchor_end), attention_matrix, anchor_freq_indices)
     
     # Wiener 필터링
     filtered_stft = apply_adaptive_wiener(stft, mask, (anchor_start, anchor_end))
@@ -867,207 +926,7 @@ def multi_pass_separation(
     return results
 
 # ==================== 시각화 ====================
-def create_debug_plot(
-    original_audio: np.ndarray,
-    results: List[SeparationResult],
-    output_dir: Path
-):
-    """디버그 시각화"""
-    for idx, result in enumerate(results):
-        # 각 패스별로 올바른 입력 오디오 선택
-        if idx == 0:
-            # Pass 1: 원본 오디오
-            input_audio = original_audio
-        else:
-            # Pass 2+: 이전 패스의 잔여 오디오
-            input_audio = results[idx-1].residual_audio
-        fig = plt.figure(figsize=(16, 10))
-        
-        # 레이아웃 설정
-        gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-        
-        # 시간축
-        time_axis = np.arange(len(input_audio)) / SR
-        
-        # 1. 입력 오디오 (Pass 1: 원본, Pass 2+: 잔여)
-        ax1 = fig.add_subplot(gs[0, 0])
-        ax1.plot(time_axis, input_audio, 'b-', alpha=0.7)
-        if idx == 0:
-            ax1.set_title('Original Audio')
-        else:
-            ax1.set_title(f'Residual Audio from Pass {idx}')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Amplitude')
-        ax1.set_ylim(-1, 1)  # -1에서 1 범위로 통일
-        ax1.grid(True, alpha=0.3)
-        
-        # 2. 분리된 오디오
-        ax2 = fig.add_subplot(gs[0, 1])
-        ax2.plot(time_axis, result.separated_audio, 'g-', alpha=0.7)
-        ax2.set_title(f'Separated: {result.classification["predicted_class"]}')
-        ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('Amplitude')
-        ax2.set_ylim(-1, 1)  # -1에서 1 범위로 통일
-        ax2.grid(True, alpha=0.3)
-        
-        # 3. 잔여 오디오
-        ax3 = fig.add_subplot(gs[0, 2])
-        ax3.plot(time_axis, result.residual_audio, 'r-', alpha=0.7)
-        ax3.set_title('Residual Audio')
-        ax3.set_xlabel('Time (s)')
-        ax3.set_ylabel('Amplitude')
-        ax3.set_ylim(-1, 1)  # -1에서 1 범위로 통일
-        ax3.grid(True, alpha=0.3)
-        
-        # 4. 템플릿 유사도
-        ax4 = fig.add_subplot(gs[1, 0])
-        time_frames = np.arange(len(result.template_similarity)) * HOP / SR
-        ax4.plot(time_frames, result.template_similarity, 'purple', linewidth=2)
-        # 5단계 유사도 임계값 표시
-        ax4.axhline(y=SeparationConfig.SIMILARITY_THRESHOLD, color='red', linestyle='-', linewidth=2,
-                   label=f'High={SeparationConfig.SIMILARITY_THRESHOLD}')
-        ax4.axhline(y=SeparationConfig.SIMILARITY_THRESHOLD * 0.7, color='orange', linestyle='--', 
-                   label=f'Med-High={SeparationConfig.SIMILARITY_THRESHOLD * 0.7:.2f}')
-        ax4.axhline(y=SeparationConfig.SIMILARITY_THRESHOLD * 0.4, color='yellow', linestyle=':', 
-                   label=f'Medium={SeparationConfig.SIMILARITY_THRESHOLD * 0.4:.2f}')
-        ax4.axhline(y=SeparationConfig.SIMILARITY_THRESHOLD * 0.2, color='lightblue', linestyle=':', 
-                   label=f'Weak={SeparationConfig.SIMILARITY_THRESHOLD * 0.2:.2f}')
-        
-        # 5단계 색상 구분
-        ax4.fill_between(time_frames, 0, result.template_similarity, 
-                         where=(result.template_similarity >= SeparationConfig.SIMILARITY_THRESHOLD),
-                         color='red', alpha=0.4, label='Very High (1.8x)')
-        ax4.fill_between(time_frames, 0, result.template_similarity, 
-                         where=((result.template_similarity >= SeparationConfig.SIMILARITY_THRESHOLD * 0.7) & 
-                                (result.template_similarity < SeparationConfig.SIMILARITY_THRESHOLD)),
-                         color='orange', alpha=0.3, label='High (1.2x)')
-        ax4.fill_between(time_frames, 0, result.template_similarity, 
-                         where=((result.template_similarity >= SeparationConfig.SIMILARITY_THRESHOLD * 0.4) & 
-                                (result.template_similarity < SeparationConfig.SIMILARITY_THRESHOLD * 0.7)),
-                         color='yellow', alpha=0.2, label='Medium (0.6x)')
-        ax4.fill_between(time_frames, 0, result.template_similarity, 
-                         where=((result.template_similarity >= SeparationConfig.SIMILARITY_THRESHOLD * 0.2) & 
-                                (result.template_similarity < SeparationConfig.SIMILARITY_THRESHOLD * 0.4)),
-                         color='lightblue', alpha=0.1, label='Weak (0.15x)')
-        ax4.fill_between(time_frames, 0, result.template_similarity, 
-                         where=(result.template_similarity < SeparationConfig.SIMILARITY_THRESHOLD * 0.2),
-                         color='lightgray', alpha=0.05, label='Very Weak (0.05x)')
-        ax4.set_title('Template Similarity')
-        ax4.set_xlabel('Time (s)')
-        ax4.set_ylabel('Similarity')
-        ax4.legend()
-        ax4.grid(True, alpha=0.3)
-        
-        # 5. 분리 마스크
-        ax5 = fig.add_subplot(gs[1, 1])
-        im5 = ax5.imshow(result.mask, aspect='auto', origin='lower', cmap='hot', interpolation='bilinear')
-        ax5.set_title('Separation Mask')
-        ax5.set_xlabel('Time frames')
-        ax5.set_ylabel('Frequency bins')
-        plt.colorbar(im5, ax=ax5, fraction=0.046)
-        
-        # 앵커 영역 표시
-        anchor_start, anchor_end = result.anchor_frames
-        ax5.axvline(x=anchor_start, color='cyan', linestyle='--', linewidth=2)
-        ax5.axvline(x=anchor_end, color='cyan', linestyle='--', linewidth=2)
-        
-        # 6. STFT 스펙트로그램
-        ax6 = fig.add_subplot(gs[1, 2])
-        _, mag, _ = compute_stft(input_audio)
-        db_spec = librosa.amplitude_to_db(mag, ref=np.max)
-        im6 = ax6.imshow(db_spec, aspect='auto', origin='lower', cmap='magma', interpolation='bilinear')
-        ax6.set_title('STFT Spectrogram (dB)')
-        ax6.set_xlabel('Time frames')
-        ax6.set_ylabel('Frequency bins')
-        plt.colorbar(im6, ax=ax6, fraction=0.046)
-        
-        # 7. 어텐션 매트릭스 (차원 일치)
-        ax7 = fig.add_subplot(gs[2, 0])
-        # 어텐션 매트릭스는 [freq_patches, time_patches] 형태
-        # imshow는 기본적으로 origin='upper'이므로 주파수가 위에서 아래로
-        # 다른 시각화와 일치시키기 위해 origin='lower'로 설정
-        im7 = ax7.imshow(result.attention_matrix, aspect='auto', origin='lower', cmap='coolwarm', interpolation='bilinear')
-        ax7.set_title('AST Attention Matrix (Frequency: 0→High)')
-        ax7.set_xlabel('Time patches')
-        ax7.set_ylabel('Frequency patches (0→High)')
-        
-        # 4.096초 경계 표시
-        valid_patches = int(INPUT_SEC / MODEL_SEC * AST_TIME_PATCHES)
-        ax7.axvline(x=valid_patches, color='green', linestyle='--', linewidth=2, label='4.096s')
-        
-        # 앵커 영역 표시 (4.096초 시간대에 맞춰)
-        anchor_start, anchor_end = result.anchor_frames
-        # STFT 프레임을 어텐션 패치로 변환 (4.096초 기준)
-        # 4.096초에 해당하는 유효 패치 수 계산
-        valid_patches = int(INPUT_SEC / MODEL_SEC * AST_TIME_PATCHES)
-        anchor_start_patch = int(anchor_start * valid_patches / (L_INPUT // HOP))
-        anchor_end_patch = int(anchor_end * valid_patches / (L_INPUT // HOP))
-        anchor_start_patch = max(0, min(valid_patches-1, anchor_start_patch))
-        anchor_end_patch = max(0, min(valid_patches, anchor_end_patch))
-        
-        # 앵커 영역 빨간색 박스로 표시
-        from matplotlib.patches import Rectangle
-        rect = Rectangle((anchor_start_patch, 0), anchor_end_patch - anchor_start_patch, 
-                        result.attention_matrix.shape[0], linewidth=3, 
-                        edgecolor='red', facecolor='none', alpha=0.8)
-        ax7.add_patch(rect)
-        
-        # 앵커 텍스트 표시
-        ax7.text(anchor_start_patch + (anchor_end_patch - anchor_start_patch) / 2, 
-                result.attention_matrix.shape[0] * 0.9,
-                f'', 
-                ha='center', va='top', fontsize=10, color='red', 
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-        
-        ax7.legend()
-        plt.colorbar(im7, ax=ax7, fraction=0.046)
-        
-        # 8. 에너지 분포
-        ax8 = fig.add_subplot(gs[2, 1])
-        energies = {
-            'Input': np.sum(input_audio ** 2),
-            'Separated': np.sum(result.separated_audio ** 2),
-            'Residual': np.sum(result.residual_audio ** 2)
-        }
-        bars = ax8.bar(energies.keys(), energies.values(), color=['blue', 'green', 'red'])
-        ax8.set_title('Energy Distribution')
-        ax8.set_ylabel('Energy')
-        
-        # 에너지 비율 표시
-        for bar, (name, value) in zip(bars, energies.items()):
-            height = bar.get_height()
-            ax8.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{value/energies["Input"]*100:.1f}%',
-                    ha='center', va='bottom')
-        
-        # 9. 분류 결과
-        ax9 = fig.add_subplot(gs[2, 2])
-        ax9.axis('off')
-        
-        # 분류 정보 텍스트
-        info_text = f"Classification Results\n" + "="*30 + "\n"
-        info_text += f"Predicted: {result.classification['predicted_class']}\n"
-        info_text += f"Confidence: {result.classification['confidence']:.2%}\n\n"
-        info_text += "Top 5 Classes:\n"
-        for cls, prob in zip(result.classification['top5_classes'][:5], 
-                            result.classification['top5_probs'][:5]):
-            info_text += f"  • {cls}: {prob:.2%}\n"
-        info_text += f"\nEnergy Ratio: {result.energy_ratio:.3f}\n"
-        info_text += f"Anchor: {anchor_start*HOP/SR:.3f}s - {anchor_end*HOP/SR:.3f}s"
-        
-        ax9.text(0.1, 0.9, info_text, transform=ax9.transAxes,
-                fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        # 전체 제목
-        fig.suptitle(f'Pass {idx + 1} - Audio Source Separation Analysis', fontsize=14, fontweight='bold')
-        
-        # 저장
-        output_path = output_dir / f'debug_pass_{idx+1}.png'
-        plt.savefig(output_path, dpi=100, bbox_inches='tight')
-        plt.close()
-        
-        print(f"  시각화 저장: {output_path}")
+
 
 # ==================== 메인 파이프라인 ====================
 class SourceSeparationPipeline:
@@ -1086,7 +945,7 @@ class SourceSeparationPipeline:
         
         # 오디오 로드
         audio_4sec, audio_10sec = load_audio(audio_path)
-        print(f"오디오 로드: {INPUT_SEC}초 → {MODEL_SEC}초 패딩")
+        #print(f"오디오 로드: {INPUT_SEC}초 → {MODEL_SEC}초 패딩")
         
         # 멀티패스 분리
         results = multi_pass_separation(audio_4sec, audio_10sec, self.ast_processor)
@@ -1148,10 +1007,7 @@ class SourceSeparationPipeline:
             json.dump(output_data, f, indent=2, ensure_ascii=False)
         print(f"메타데이터: {metadata_path}")
         
-        # 시각화
-        if visualize:
-            print(f"\n시각화 생성 중...")
-            create_debug_plot(audio_4sec, results, self.output_dir)
+        
         
         print(f"\n{'='*60}")
         print(f"처리 완료!")
@@ -1239,7 +1095,7 @@ def main():
     
     # 헤더 출력
     print("\n" + "="*60)
-    print("AST 기반 음원 분리 파이프라인 v1.0")
+    #print("AST 기반 음원 분리 파이프라인 v1.0")
     print("="*60)
     print(f"설정:")
     print(f"  - 입력: {INPUT_SEC}초")

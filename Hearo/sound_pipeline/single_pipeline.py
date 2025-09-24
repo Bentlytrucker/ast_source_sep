@@ -1,11 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Single Thread Sound Pipeline - Raspberry Pi용
-- Fast Classification → Source Separation (Sequential)
-- 중복 클래스 전송 방지
-- 각 패스마다 백엔드 전송 + LED 활성화
-"""
+
 
 import os
 import sys
@@ -16,7 +9,7 @@ import argparse
 from typing import Optional, Dict, Any, Set
 from datetime import datetime, timedelta
 
-# 파이프라인 모듈들 import
+
 from sound_trigger import SoundTrigger
 from doa_calculator import create_doa_calculator
 from sound_separator import create_sound_separator
@@ -24,20 +17,9 @@ from led_controller import create_led_controller
 
 
 class SingleSoundPipeline:
-    """Single Thread Sound Pipeline - Raspberry Pi용"""
-    
     def __init__(self, output_dir: str = "pipeline_output", 
                  model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593",
                  device: str = "auto", backend_url: str = "http://13.238.200.232:8000/sound-events/"):
-        """
-        Sound Pipeline 초기화
-        
-        Args:
-            output_dir: 출력 디렉토리
-            model_name: AST 모델 이름
-            device: 사용할 디바이스
-            backend_url: 백엔드 API URL
-        """
         self.output_dir = output_dir
         self.model_name = model_name
         self.device = device
@@ -165,8 +147,7 @@ class SingleSoundPipeline:
                         audio_duration = len(audio_data) / 16000  # 16kHz 가정
                         
                         # separator.py의 calculate_sound_occurrence_time 함수 사용
-                        sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-                        from separator import calculate_sound_occurrence_time
+                        from sound_pipeline.separator import calculate_sound_occurrence_time
                         occurred_at = calculate_sound_occurrence_time(
                             source_info['separation_mask'], 
                             inference_start_time, 

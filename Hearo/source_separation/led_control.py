@@ -1,4 +1,4 @@
-from usb_pixel_ring_v2 import PixelRing
+from pixelring.pixelring.usb_pixel_ring_v2 import PixelRing
 import usb.core
 import usb.util
 import time
@@ -19,5 +19,6 @@ if dev:
         
         except KeyboardInterrupt:
             break
+
 
     pixel_ring.off()

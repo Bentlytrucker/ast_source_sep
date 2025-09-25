@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Single Separator for Raspberry Pi 5
-- AST 기반 음원 분리 파이프라인을 단일 파일로 구현
-- separator.py와 동일한 분리 로직 사용
-- Raspberry Pi 5에 최적화
-- 백엔드 전송 시 sound type 필터링 (danger, help, warning만 전송)
-- LED 제어 기능 포함
+- Implement AST-based audio source separation pipeline in a single file
+- Use the same separation logic as separator.py
+- Optimized for Raspberry Pi 5
+- Sound type filtering when sending to backend (only send danger, help, warning)
+- Include LED control functionality
 """
 
 import os
@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-# 환경 설정
+# Environment configuration
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 warnings.filterwarnings("ignore")
@@ -41,30 +41,30 @@ except ImportError:
     ASTForAudioClassification = None
     TRANSFORMERS_AVAILABLE = False
 
-# ==================== 상수 정의 ====================
+# ==================== Constants Definition ====================
 class AudioConfig:
-    """오디오 처리 설정"""
-    SR = 16000  # 샘플링 레이트
-    INPUT_SEC = 4.096  # 실제 입력 오디오 길이
-    MODEL_SEC = 10.24  # AST 모델 처리 길이
-    L_INPUT = int(round(INPUT_SEC * SR))  # 65,536 샘플
-    L_MODEL = int(round(MODEL_SEC * SR))  # 163,840 샘플
+    """Audio processing configuration"""
+    SR = 16000  # Sampling rate
+    INPUT_SEC = 4.096  # Actual input audio length
+    MODEL_SEC = 10.24  # AST model processing length
+    L_INPUT = int(round(INPUT_SEC * SR))  # 65,536 samples
+    L_MODEL = int(round(MODEL_SEC * SR))  # 163,840 samples
 
 class STFTConfig:
-    """STFT 설정"""
+    """STFT configuration"""
     N_FFT = 400
     HOP = 160
     WINLEN = 400
     N_MELS = 128
 
 class ASTConfig:
-    """AST 모델 설정"""
+    """AST model configuration"""
     MAX_LENGTH = 1024
     FREQ_PATCHES = 12  # (128 - 16) / 10 + 1
     TIME_PATCHES = 101  # (1024 - 16) / 10 + 1
 
 class SeparationConfig:
-    """분리 파라미터"""
+    """Separation parameters"""
     SIMILARITY_THRESHOLD = 0.6
     WEAK_MASK_FACTOR = 0.1
     MIN_ANCHOR_FRAMES = 8
@@ -74,7 +74,7 @@ class SeparationConfig:
     MEDIUM_MASK_FACTOR = 0.6
 
 class WienerConfig:
-    """Wiener 필터링 설정"""
+    """Wiener filtering configuration"""
     TANH_SCALE = 3.0
     SIGMOID_SCALE = 10.0
     SIGMOID_THRESHOLD = 0.6
@@ -96,10 +96,10 @@ HOP = STFTConfig.HOP
 WINLEN = STFTConfig.WINLEN
 N_MELS = STFTConfig.N_MELS
 
-# ==================== 데이터 클래스 ====================
+# ==================== Data Classes ====================
 @dataclass
 class SeparationResult:
-    """분리 결과 저장"""
+    """Store separation results"""
     separated_audio: np.ndarray
     residual_audio: np.ndarray
     mask: np.ndarray
@@ -109,9 +109,9 @@ class SeparationResult:
     attention_matrix: np.ndarray
     template_similarity: np.ndarray
 
-# ==================== 유틸리티 함수 ====================
+# ==================== Utility Functions ====================
 def get_sound_type(class_id: int) -> str:
-    """클래스 ID를 소리 타입으로 변환"""
+    """Convert class ID to sound type"""
     if class_id in DANGER_IDS:
         return "danger"
     elif class_id in HELP_IDS:
@@ -122,7 +122,7 @@ def get_sound_type(class_id: int) -> str:
         return "other"
 
 def should_send_to_backend(sound_type: str, class_name: str) -> bool:
-    """백엔드로 전송할지 결정하는 함수"""
+    """Function to decide whether to send to backend"""
     # other 타입이거나 silence 클래스는 전송하지 않음
     if sound_type == "other":
         return False
@@ -132,14 +132,14 @@ def should_send_to_backend(sound_type: str, class_name: str) -> bool:
     return sound_type in ["danger", "help", "warning"]
 
 def should_activate_led(sound_type: str, class_name: str) -> bool:
-    """LED를 활성화할지 결정하는 함수"""
+    """Function to decide whether to activate LED"""
     # danger, help, warning 타입에만 LED 활성화
     return sound_type in ["danger", "help", "warning"]
 
 def calculate_sound_occurrence_time(separation_mask: np.ndarray, 
                                   inference_start_time: datetime, 
                                   audio_duration: float = 4.096) -> str:
-    """분리 마스크를 기반으로 소리 발생 시간 계산"""
+    """Calculate sound occurrence time based on separation mask"""
     try:
         if separation_mask is None or len(separation_mask.shape) < 2:
             return inference_start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -168,18 +168,18 @@ def calculate_sound_occurrence_time(separation_mask: np.ndarray,
         print(f"Sound occurrence time calculation failed: {e}")
         return inference_start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# ==================== AST 모델 처리 ====================
+# ==================== AST Model Processing ====================
 class ASTProcessor:
-    """AST 모델 처리 - Raspberry Pi 5 최적화"""
+    """AST model processing - Raspberry Pi 5 optimized"""
     
     def __init__(self, model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593"):
         # CPU 강제 설정 (Raspberry Pi 5 최적화)
         self.device = torch.device("cpu")
         torch.set_num_threads(2)  # Raspberry Pi 5에 적합한 스레드 수
-        print(f"디바이스: CPU (스레드: 2) - Raspberry Pi 5 최적화")
+        print(f"Device: CPU (threads: 2) - Raspberry Pi 5 optimized")
         
         if not TRANSFORMERS_AVAILABLE:
-            print("❌ Transformers not available - AST 모델을 로드할 수 없습니다!")
+            print("❌ Transformers not available - Cannot load AST model!")
             self.is_available = False
             return
         
@@ -206,20 +206,20 @@ class ASTProcessor:
                 self.model = torch.quantization.quantize_dynamic(
                     self.model, {torch.nn.Linear}, dtype=torch.qint8
                 )
-                print("양자화 적용: 성공 (Raspberry Pi 5 최적화)")
+                print("Quantization applied: Success (Raspberry Pi 5 optimized)")
             except:
-                print("양자화 적용: 실패 (일반 모드)")
+                print("Quantization applied: Failed (normal mode)")
             
             self.model.eval()
             self.is_available = True
-            print("AST 모델 로드 완료 - Raspberry Pi 5 최적화")
+            print("AST model loaded successfully - Raspberry Pi 5 optimized")
             
         except Exception as e:
-            print(f"AST 모델 로드 실패: {e}")
+            print(f"AST model load failed: {e}")
             self.is_available = False
     
     def process(self, audio: np.ndarray) -> Tuple[np.ndarray, Dict, np.ndarray]:
-        """10.24초로 패딩하여 처리"""
+        """Process with 10.24 second padding"""
         if not self.is_available:
             # 모델이 없을 때 더미 데이터 반환
             dummy_attention = np.ones((ASTConfig.FREQ_PATCHES, ASTConfig.TIME_PATCHES)) * 0.5
@@ -277,9 +277,9 @@ class ASTProcessor:
         
         return attention_matrix, classification, spectrogram
 
-# ==================== 오디오 처리 함수 ====================
+# ==================== Audio Processing Functions ====================
 def load_audio(file_path: str) -> Tuple[np.ndarray, np.ndarray]:
-    """오디오 로드 및 패딩"""
+    """Audio loading and padding"""
     audio, _ = librosa.load(file_path, sr=SR, mono=True)
     
     # 4.096초 버전
@@ -291,15 +291,15 @@ def load_audio(file_path: str) -> Tuple[np.ndarray, np.ndarray]:
     return audio_4sec, audio_10sec
 
 def compute_stft(audio: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """STFT 계산"""
+    """STFT calculation"""
     stft = librosa.stft(audio, n_fft=N_FFT, hop_length=HOP, win_length=WINLEN)
     mag = np.abs(stft)
     phase = np.angle(stft)
     return stft, mag, phase
 
-# ==================== 템플릿 기반 분포 유사도 ====================
+# ==================== Template-based Distribution Similarity ====================
 def calculate_distribution_similarity(template: np.ndarray, current: np.ndarray) -> float:
-    """주파수-진폭 분포 유사도 계산"""
+    """Calculate frequency-amplitude distribution similarity"""
     # 양수 값 보장
     template_positive = np.maximum(template, 1e-8)
     current_positive = np.maximum(current, 1e-8)
@@ -331,14 +331,14 @@ def calculate_distribution_similarity(template: np.ndarray, current: np.ndarray)
     
     return total_sim
 
-# ==================== 앵커 선정 ====================
+# ==================== Anchor Selection ====================
 def find_attention_anchor(
     attention_matrix: np.ndarray,
     suppressed_regions: List[Tuple[int, int]],
     previous_peaks: List[Tuple[int, int]],
     audio_length: int
 ) -> Tuple[int, int, bool]:
-    """어텐션 매트릭스에서 앵커 선정"""
+    """Select anchor from attention matrix"""
     num_freq_patches, num_time_patches = attention_matrix.shape
     max_frames = audio_length // HOP
     valid_patches = int(INPUT_SEC / MODEL_SEC * num_time_patches)
@@ -442,13 +442,13 @@ def find_attention_anchor(
     
     return anchor_start, anchor_end, True
 
-# ==================== 템플릿 기반 마스킹 ====================
+# ==================== Template-based Masking ====================
 def create_template_mask(
     stft_mag: np.ndarray,
     anchor_frames: Tuple[int, int],
     attention_weights: Optional[np.ndarray] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """템플릿 기반 분포 유사도 마스킹"""
+    """Template-based distribution similarity masking"""
     anchor_start, anchor_end = anchor_frames
     
     # 앵커 범위 검증
@@ -517,13 +517,13 @@ def create_template_mask(
     
     return mask, similarity
 
-# ==================== Wiener 필터링 ====================
+# ==================== Wiener Filtering ====================
 def apply_adaptive_wiener(
     stft: np.ndarray,
     mask: np.ndarray,
     anchor_frames: Tuple[int, int]
 ) -> np.ndarray:
-    """적응적 Wiener 필터링"""
+    """Adaptive Wiener filtering"""
     anchor_start, anchor_end = anchor_frames
     
     # 노이즈 추정
@@ -552,7 +552,7 @@ def apply_adaptive_wiener(
     
     return stft * enhanced_wiener_gain
 
-# ==================== 단일 패스 처리 ====================
+# ==================== Single Pass Processing ====================
 def process_single_pass(
     audio_4sec: np.ndarray,
     audio_10sec: np.ndarray,
@@ -561,9 +561,9 @@ def process_single_pass(
     previous_peaks: List[Tuple[int, int]],
     pass_idx: int
 ) -> Optional[SeparationResult]:
-    """단일 패스 음원 분리"""
+    """Single pass audio source separation"""
     
-    print(f"  패스 {pass_idx + 1} 처리 중...")
+    print(f"  Processing pass {pass_idx + 1}...")
     
     # AST 처리
     attention_matrix, classification, ast_spec = ast_processor.process(audio_10sec)
@@ -611,14 +611,17 @@ def process_single_pass(
         template_similarity=similarity
     )
 
-# ==================== 멀티패스 분리 ====================
+# ==================== Multi-pass Separation ====================
 def multi_pass_separation(
     audio_4sec: np.ndarray,
     audio_10sec: np.ndarray,
     ast_processor: ASTProcessor,
-    max_passes: int = 2
+    max_passes: int = 2,
+    backend_url: str = None,
+    led_controller = None,
+    angle: int = 0
 ) -> List[SeparationResult]:
-    """멀티패스 음원 분리"""
+    """Multi-pass audio source separation with per-pass processing"""
     results = []
     suppressed_regions = []
     previous_peaks = []
@@ -635,10 +638,79 @@ def multi_pass_separation(
         )
         
         if result is None or result.energy_ratio < 0.0001:
-            print(f"  종료: 에너지 부족")
+            print(f"  Termination: Insufficient energy")
             break
         
-        # 상위 어텐션 영역 저장
+        # Extract classification info for this pass
+        class_name = result.classification['predicted_class']
+        confidence = result.classification['confidence']
+        
+        # Check for silence detection - break immediately if silence detected
+        if class_name.lower() == "silence":
+            print(f"  Silence detected in pass {i + 1}, breaking separation")
+            break
+        
+        # Get class ID and sound type
+        class_id = -1
+        if hasattr(ast_processor, 'model') and hasattr(ast_processor.model, 'config'):
+            for id_val, label in ast_processor.model.config.id2label.items():
+                if label == class_name:
+                    class_id = id_val
+                    break
+        
+        sound_type = get_sound_type(class_id)
+        
+        # Calculate dB
+        rms = np.sqrt(np.mean(result.separated_audio ** 2))
+        db_mean = 20 * np.log10(rms + 1e-10) if rms > 0 else -np.inf
+        
+        # Calculate sound occurrence time
+        recording_end_time = datetime.utcnow()
+        occurred_at = calculate_sound_occurrence_time(
+            result.mask, 
+            recording_end_time, 
+            audio_duration=len(audio_4sec)/SR
+        )
+        
+        # Per-pass backend sending and LED control
+        backend_sent = False
+        led_activated = False
+        
+        if sound_type == "other":
+            print(f"  Pass {i + 1}: {class_name} (other) - No backend, No LED")
+        else:
+            # Backend sending for danger/help/warning types
+            if should_send_to_backend(sound_type, class_name) and backend_url:
+                backend_sent = send_to_backend(
+                    sound_type, class_name, angle, db_mean, 
+                    occurred_at, backend_url
+                )
+                if backend_sent:
+                    print(f"  Pass {i + 1}: {class_name} ({sound_type}) - Backend sent")
+                else:
+                    print(f"  Pass {i + 1}: {class_name} ({sound_type}) - Backend failed")
+            
+            # LED activation for danger/help/warning types
+            if should_activate_led(sound_type, class_name) and led_controller:
+                try:
+                    led_activated = led_controller.activate_led(angle, class_name, sound_type)
+                    if led_activated:
+                        print(f"  Pass {i + 1}: {class_name} ({sound_type}) - LED activated")
+                    else:
+                        print(f"  Pass {i + 1}: {class_name} ({sound_type}) - LED failed")
+                except Exception as e:
+                    print(f"  Pass {i + 1}: LED activation error: {e}")
+        
+        # Store backend and LED status in result
+        result.backend_sent = backend_sent
+        result.led_activated = led_activated
+        result.sound_type = sound_type
+        result.class_id = class_id
+        result.db_mean = db_mean
+        result.occurred_at = occurred_at
+        result.angle = angle
+        
+        # Store attention peaks for next pass
         att_mean = np.mean(result.attention_matrix, axis=0)
         threshold = np.percentile(att_mean, SeparationConfig.ATTENTION_PERCENTILE)
         peaks = np.where(att_mean > threshold)[0]
@@ -648,20 +720,20 @@ def multi_pass_separation(
         results.append(result)
         suppressed_regions.append(result.anchor_frames)
         
-        # 잔여 오디오로 업데이트
+        # Update residual audio for next pass
         current_4sec = result.residual_audio
         current_10sec = np.pad(result.residual_audio, (0, max(0, L_MODEL - len(result.residual_audio))))[:L_MODEL]
         
-        print(f"  클래스: {result.classification['predicted_class']}")
-        print(f"  신뢰도: {result.classification['confidence']:.3f}")
-        print(f"  에너지: {result.energy_ratio:.3f}")
+        print(f"  Class: {class_name}")
+        print(f"  Confidence: {confidence:.3f}")
+        print(f"  Energy: {result.energy_ratio:.3f}")
     
     return results
 
-# ==================== 백엔드 전송 ====================
+# ==================== Backend Transmission ====================
 def send_to_backend(sound_type: str, sound_detail: str, angle: int, decibel: float, 
                    occurred_at: str, backend_url: str, user_id: int = 6) -> bool:
-    """백엔드로 결과 전송"""
+    """Send results to backend"""
     try:
         data = {
             "user_id": user_id,
@@ -679,8 +751,8 @@ def send_to_backend(sound_type: str, sound_detail: str, angle: int, decibel: flo
             'User-Agent': 'SingleSeparator/1.0'
         }
         
-        print(f"🔄 백엔드 전송: {backend_url}")
-        print(f"📤 데이터: {data}")
+        print(f"🔄 Sending to backend: {backend_url}")
+        print(f"📤 Data: {data}")
         
         response = requests.post(
             backend_url, 
@@ -691,202 +763,160 @@ def send_to_backend(sound_type: str, sound_detail: str, angle: int, decibel: flo
         )
         
         if response.status_code == 200:
-            print(f"✅ 백엔드 전송 성공: {sound_detail} ({sound_type})")
+            print(f"✅ Backend send successful: {sound_detail} ({sound_type})")
             return True
         else:
-            print(f"❌ 백엔드 오류: {response.status_code}")
+            print(f"❌ Backend error: {response.status_code}")
             return False
             
     except Exception as e:
-        print(f"❌ 백엔드 전송 실패: {e}")
+        print(f"❌ Backend send failed: {e}")
         return False
 
-# ==================== 메인 분리 클래스 ====================
+# ==================== Main Separator Class ====================
 class SingleSeparator:
-    """Raspberry Pi 5용 단일 음원 분리기"""
+    """Single audio source separator for Raspberry Pi 5""
     
     def __init__(self, model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593",
                  backend_url: str = "http://13.238.200.232:8000/sound-events/",
                  led_controller=None):
         """
-        초기화
+        Initialization
         
         Args:
-            model_name: AST 모델 이름
-            backend_url: 백엔드 API URL
-            led_controller: LED 컨트롤러 (선택사항)
+            model_name: AST model name
+            backend_url: Backend API URL
+            led_controller: LED controller (optional)
         """
         self.backend_url = backend_url
         self.led_controller = led_controller
         self.ast_processor = ASTProcessor(model_name)
         
-        print("🎵 Single Separator for Raspberry Pi 5 초기화 완료")
-        print(f"모델 사용 가능: {self.ast_processor.is_available}")
+        print("🎵 Single Separator for Raspberry Pi 5 initialization completed")
+        print(f"Model available: {self.ast_processor.is_available}")
     
     def separate_and_process(self, audio_file: str, angle: int = 0, 
                            max_passes: int = 2, output_dir: str = None) -> List[Dict[str, Any]]:
         """
-        오디오 파일 분리 및 처리
+        Audio file separation and processing
         
         Args:
-            audio_file: 오디오 파일 경로
-            angle: 방향각 (0-359)
-            max_passes: 최대 패스 수
-            output_dir: 출력 디렉토리 (선택사항)
+            audio_file: Audio file path
+            angle: Direction angle (0-359)
+            max_passes: Maximum number of passes
+            output_dir: Output directory (optional)
             
         Returns:
-            분리된 소스들의 정보 리스트
+            List of separated source information
         """
-        print(f"\n🔍 오디오 분리 시작: {audio_file}")
-        print(f"각도: {angle}°, 최대 패스: {max_passes}")
+        print(f"\n🔍 Starting audio separation: {audio_file}")
+        print(f"Angle: {angle}°, Max passes: {max_passes}")
         
         try:
-            # 오디오 로드
+            # Load audio
             audio_4sec, audio_10sec = load_audio(audio_file)
-            print(f"오디오 로드: {INPUT_SEC}초")
+            print(f"Audio loaded: {INPUT_SEC} seconds")
             
-            # 분리 실행
-            results = multi_pass_separation(audio_4sec, audio_10sec, self.ast_processor, max_passes)
+            # Execute separation with per-pass processing
+            results = multi_pass_separation(
+                audio_4sec, audio_10sec, self.ast_processor, max_passes,
+                backend_url=self.backend_url, led_controller=self.led_controller, angle=angle
+            )
             
-            # 결과 처리
+            # Process results
             processed_sources = []
-            recording_end_time = datetime.utcnow()
             
             for idx, result in enumerate(results):
-                # 클래스 정보 추출
+                # Extract class information
                 class_name = result.classification['predicted_class']
                 confidence = result.classification['confidence']
-                
-                # 클래스 ID 추출 (top5_classes에서 첫 번째가 predicted_class)
-                class_id = -1
-                if hasattr(self.ast_processor, 'model') and hasattr(self.ast_processor.model, 'config'):
-                    for id_val, label in self.ast_processor.model.config.id2label.items():
-                        if label == class_name:
-                            class_id = id_val
-                            break
-                
-                sound_type = get_sound_type(class_id)
-                
-                # dB 계산
-                rms = np.sqrt(np.mean(result.separated_audio ** 2))
-                db_mean = 20 * np.log10(rms + 1e-10) if rms > 0 else -np.inf
-                
-                # 소리 발생 시간 계산
-                occurred_at = calculate_sound_occurrence_time(
-                    result.mask, 
-                    recording_end_time, 
-                    audio_duration=len(audio_4sec)/SR
-                )
                 
                 source_info = {
                     'pass': idx + 1,
                     'class_name': class_name,
-                    'sound_type': sound_type,
+                    'sound_type': result.sound_type,
                     'confidence': confidence,
-                    'class_id': class_id,
-                    'db_mean': db_mean,
-                    'angle': angle,
-                    'occurred_at': occurred_at,
+                    'class_id': result.class_id,
+                    'db_mean': result.db_mean,
+                    'angle': result.angle,
+                    'occurred_at': result.occurred_at,
                     'energy_ratio': result.energy_ratio,
                     'audio': result.separated_audio,
                     'anchor_frames': result.anchor_frames,
-                    'separation_mask': result.mask
+                    'separation_mask': result.mask,
+                    'backend_sent': result.backend_sent,
+                    'led_activated': result.led_activated
                 }
                 
-                # 백엔드 전송 (필터링 적용)
-                backend_success = False
-                if should_send_to_backend(sound_type, class_name):
-                    backend_success = send_to_backend(
-                        sound_type, class_name, angle, db_mean, 
-                        occurred_at, self.backend_url
-                    )
-                    print(f"✅ 백엔드 전송: {class_name} ({sound_type})")
-                else:
-                    print(f"⏭️ 백엔드 전송 건너뛰기: {class_name} ({sound_type}) - other 타입")
-                
-                # LED 활성화 (필터링 적용)
-                led_success = False
-                if should_activate_led(sound_type, class_name) and self.led_controller:
-                    try:
-                        led_success = self.led_controller.activate_led(angle, class_name, sound_type)
-                        print(f"💡 LED 활성화: {class_name} at {angle}°")
-                    except Exception as e:
-                        print(f"❌ LED 활성화 실패: {e}")
-                elif not should_activate_led(sound_type, class_name):
-                    print(f"⏭️ LED 활성화 건너뛰기: {class_name} ({sound_type}) - other 타입")
-                
-                source_info['backend_sent'] = backend_success
-                source_info['led_activated'] = led_success
-                
-                # 파일 저장 (선택사항)
+                # Save file (optional)
                 if output_dir:
                     os.makedirs(output_dir, exist_ok=True)
                     timestamp = int(time.time())
                     safe_class_name = "".join(c for c in class_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
                     safe_class_name = safe_class_name.replace(' ', '_')
-                    filename = f"separated_{timestamp}_{safe_class_name}_{sound_type}_pass{idx+1}.wav"
+                    filename = f"separated_{timestamp}_{safe_class_name}_{result.sound_type}_pass{idx+1}.wav"
                     filepath = os.path.join(output_dir, filename)
                     sf.write(filepath, result.separated_audio, SR)
                     source_info['file_path'] = filepath
                 
                 processed_sources.append(source_info)
                 
-                print(f"🎵 패스 {idx+1}: {class_name} ({sound_type}) - 신뢰도: {confidence:.3f}")
+                print(f"🎵 Pass {idx+1}: {class_name} ({result.sound_type}) - Confidence: {confidence:.3f}")
             
-            print(f"✅ 분리 완료: {len(processed_sources)}개 소스")
+            print(f"✅ Separation completed: {len(processed_sources)} sources")
             return processed_sources
             
         except Exception as e:
-            print(f"❌ 분리 오류: {e}")
+            print(f"❌ Separation error: {e}")
             import traceback
             traceback.print_exc()
             return []
     
     def cleanup(self):
-        """리소스 정리"""
+        """Resource cleanup"""
         if self.led_controller:
             try:
                 self.led_controller.turn_off()
             except:
                 pass
 
-# ==================== 팩토리 함수 ====================
+# ==================== Factory Function ====================
 def create_single_separator(model_name: str = "MIT/ast-finetuned-audioset-10-10-0.4593",
                            backend_url: str = "http://13.238.200.232:8000/sound-events/",
                            led_controller=None) -> SingleSeparator:
-    """SingleSeparator 인스턴스 생성"""
+    """Create SingleSeparator instance"""
     return SingleSeparator(model_name, backend_url, led_controller)
 
-# ==================== 메인 실행 ====================
+# ==================== Main Execution ====================
 def main():
-    """메인 실행 함수"""
+    """Main execution function"""
     import argparse
     
     parser = argparse.ArgumentParser(description='Single Separator for Raspberry Pi 5')
-    parser.add_argument('--input', '-i', type=str, required=True, help='입력 오디오 파일 경로')
-    parser.add_argument('--output', '-o', type=str, default='separated_output', help='출력 디렉토리')
-    parser.add_argument('--angle', '-a', type=int, default=0, help='방향각 (0-359)')
-    parser.add_argument('--max-passes', type=int, default=2, help='최대 패스 수')
+    parser.add_argument('--input', '-i', type=str, required=True, help='Input audio file path')
+    parser.add_argument('--output', '-o', type=str, default='separated_output', help='Output directory')
+    parser.add_argument('--angle', '-a', type=int, default=0, help='Direction angle (0-359)')
+    parser.add_argument('--max-passes', type=int, default=2, help='Maximum number of passes')
     parser.add_argument('--backend-url', type=str, default="http://13.238.200.232:8000/sound-events/", 
-                       help='백엔드 API URL')
+                       help='Backend API URL')
     
     args = parser.parse_args()
     
-    # 입력 파일 확인
+    # Check input file
     if not os.path.exists(args.input):
-        print(f"❌ 입력 파일을 찾을 수 없습니다: {args.input}")
+        print(f"❌ Input file not found: {args.input}")
         return
     
     print("🎵 Single Separator for Raspberry Pi 5")
     print("=" * 50)
-    print(f"입력: {args.input}")
-    print(f"출력: {args.output}")
-    print(f"각도: {args.angle}°")
-    print(f"최대 패스: {args.max_passes}")
-    print(f"백엔드 URL: {args.backend_url}")
+    print(f"Input: {args.input}")
+    print(f"Output: {args.output}")
+    print(f"Angle: {args.angle}°")
+    print(f"Max passes: {args.max_passes}")
+    print(f"Backend URL: {args.backend_url}")
     print("=" * 50)
     
-    # 분리기 생성 및 실행
+    # Create and run separator
     separator = create_single_separator(backend_url=args.backend_url)
     
     try:
@@ -897,23 +927,23 @@ def main():
             output_dir=args.output
         )
         
-        # 결과 요약
-        print(f"\n📊 분리 결과 요약:")
-        print(f"총 {len(results)}개의 소스 분리됨")
+        # Result summary
+        print(f"\n📊 Separation result summary:")
+        print(f"Total {len(results)} sources separated")
         
         for i, result in enumerate(results, 1):
             backend_status = "✅" if result['backend_sent'] else "❌"
             led_status = "💡" if result['led_activated'] else "⭕"
             print(f"{i}. {result['class_name']} ({result['sound_type']}) - "
-                  f"신뢰도: {result['confidence']:.3f}, "
-                  f"백엔드: {backend_status}, LED: {led_status}")
+                  f"Confidence: {result['confidence']:.3f}, "
+                  f"Backend: {backend_status}, LED: {led_status}")
         
-        print("\n✅ 처리 완료!")
+        print("\n✅ Processing completed!")
         
     except KeyboardInterrupt:
-        print("\n🛑 사용자에 의해 중단됨")
+        print("\n🛑 Interrupted by user")
     except Exception as e:
-        print(f"\n❌ 오류 발생: {e}")
+        print(f"\n❌ Error occurred: {e}")
     finally:
         separator.cleanup()
 

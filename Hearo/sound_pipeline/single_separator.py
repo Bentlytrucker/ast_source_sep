@@ -24,8 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+
 
 # Environment configuration
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'

@@ -54,19 +54,34 @@ class LEDController:
                 self.is_available = False
                 return
             
-            # find 함수를 사용하여 PixelRing 인스턴스 생성
-            self.pixel_ring = find()
+            # find 함수를 사용하여 PixelRing 인스턴스 생성 (재시도 포함)
+            print("[LED] Attempting to find ReSpeaker device...")
+            for attempt in range(3):  # 최대 3번 시도
+                try:
+                    self.pixel_ring = find()
+                    if self.pixel_ring:
+                        break
+                    else:
+                        print(f"[LED] Attempt {attempt + 1}/3: Device not found")
+                        if attempt < 2:  # 마지막 시도가 아니면 잠시 대기
+                            import time
+                            time.sleep(1)
+                except Exception as e:
+                    print(f"[LED] Attempt {attempt + 1}/3 failed: {e}")
+                    if attempt < 2:
+                        import time
+                        time.sleep(1)
             
             if self.pixel_ring:
                 self.is_available = True
-                print(f"[LED] ReSpeaker device found and initialized")
+                print(f"[LED] ReSpeaker device found and initialized successfully")
                 
                 # 초기 설정 - sleep 모드로 시작
                 self.pixel_ring.set_brightness(0x001)
                 self.pixel_ring.off()  # sleep 모드로 시작
                 print("[LED] Started in sleep mode")
             else:
-                print("[LED] ReSpeaker device not found")
+                print("[LED] ReSpeaker device not found after all attempts")
                 self.is_available = False
                 
         except Exception as e:
@@ -576,13 +591,13 @@ def create_led_controller() -> LEDController:
     LED Controller 인스턴스 생성 - 무조건 실제 PixelRing 사용
     
     Returns:
-        LEDController 인스턴스 (실패 시 None)
+        LEDController 인스턴스 (항상 반환)
     """
     controller = LEDController()
     
     if not controller.is_device_available():
-        print("[LED] PixelRing not available - LED control disabled")
-        return None
+        print("[LED] PixelRing not available - LED control will attempt initialization")
+        # 하드웨어가 없어도 컨트롤러 객체는 반환 (메서드 호출 시 처리)
     
     return controller
 

@@ -806,13 +806,19 @@ class SingleSeparator:
                 
                 # LED 활성화 (필터링 적용)
                 led_success = False
-                if should_activate_led(sound_type, class_name) and self.led_controller:
-                    try:
-                        led_success = self.led_controller.activate_led(angle, class_name, sound_type)
-                        print(f"💡 LED 활성화: {class_name} at {angle}°")
-                    except Exception as e:
-                        print(f"❌ LED 활성화 실패: {e}")
-                elif not should_activate_led(sound_type, class_name):
+                if should_activate_led(sound_type, class_name):
+                    if self.led_controller:
+                        try:
+                            led_success = self.led_controller.activate_led(angle, class_name, sound_type)
+                            if led_success:
+                                print(f"💡 LED 활성화 성공: {class_name} at {angle}°")
+                            else:
+                                print(f"⚠️ LED 활성화 시도했으나 실패: {class_name} at {angle}°")
+                        except Exception as e:
+                            print(f"❌ LED 활성화 실패: {e}")
+                    else:
+                        print(f"⚠️ LED 컨트롤러가 없음: {class_name} ({sound_type})")
+                else:
                     print(f"⏭️ LED 활성화 건너뛰기: {class_name} ({sound_type}) - other 타입")
                 
                 source_info['backend_sent'] = backend_success

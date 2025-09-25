@@ -58,8 +58,12 @@ class SingleSoundPipeline:
         # Initialize LED Controller first (needed for Sound Separator)
         print("3. Initializing LED Controller...")
         self.led_controller = create_led_controller()
-        if self.led_controller is None:
-            print("⚠️ LED Controller not available - LED control disabled")
+        if self.led_controller and self.led_controller.is_device_available():
+            print("✅ LED Controller initialized successfully with hardware")
+        elif self.led_controller:
+            print("⚠️ LED Controller initialized but hardware not detected")
+        else:
+            print("❌ LED Controller initialization failed")
         
         # Initialize Sound Separator with LED Controller
         print("4. Initializing Single Separator...")
@@ -215,7 +219,11 @@ class SingleSoundPipeline:
         
         # LED 끄기
         if self.led_controller:
-            self.led_controller.turn_off()
+            try:
+                self.led_controller.turn_off()
+                print("✅ LED 정리 완료")
+            except Exception as e:
+                print(f"⚠️ LED 정리 중 오류: {e}")
         
         self.is_running = False
         print("✅ Single Thread Sound Pipeline stopped")

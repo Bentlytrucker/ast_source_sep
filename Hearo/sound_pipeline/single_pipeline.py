@@ -25,16 +25,16 @@ class SingleSoundPipeline:
         self.device = device
         self.backend_url = backend_url
         
-        # 출력 디렉토리 생성
+            # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
-        # 상태 관리
+        # State management
         self.is_running = False
         
-        # 각 오디오 파일마다 독립적인 중복 클래스 전송 방지를 위한 세트
+        # Set for preventing duplicate class transmission for each audio file independently
         self.current_sent_classes: Set[str] = set()
         
-        # 통계
+        # Statistics
         self.stats = {
             "total_detected": 0,
             "successful_separations": 0,
@@ -44,7 +44,7 @@ class SingleSoundPipeline:
         }
     
     def _initialize_components(self):
-        """컴포넌트들 초기화"""
+        """Initialize components"""
         print("=== Single Thread Pipeline Initialization ===")
         
         # Initialize Sound Trigger
@@ -81,7 +81,7 @@ class SingleSoundPipeline:
         print("=== Single Thread Pipeline Ready ===")
     
     def _main_loop(self):
-        """메인 루프 - 소리 감지부터 분리까지 순차 처리"""
+        """Main loop - sequential processing from sound detection to separation"""
         while self.is_running:
             try:
                 # 1. 소리 감지 및 녹음
@@ -91,10 +91,10 @@ class SingleSoundPipeline:
                     self.stats["total_detected"] += 1
                     print(f"\n🎵 Processing: {os.path.basename(recorded_file)}")
                     
-                    # 녹음 완료 시점 기록
+                    # Record recording completion time
                     recording_end_time = datetime.utcnow()
                     
-                    # 2. 음원 분리 및 백엔드 전송
+                    # 2. Audio source separation and backend transmission
                     separation_result = self._process_separation(recorded_file, recording_end_time)
                     
                     if separation_result["success"]:
@@ -109,7 +109,7 @@ class SingleSoundPipeline:
     
     
     def _process_separation(self, audio_file: str, recording_end_time: datetime) -> Dict[str, Any]:
-        """음원 분리 및 각 패스마다 백엔드 전송 (중복 클래스 전송 방지)"""
+        """Audio source separation and backend transmission for each pass (preventing duplicate class transmission)"""
         try:
             # 1. Calculate DOA
             angle = self.doa_calculator.get_direction_with_retry(max_retries=2)
@@ -118,13 +118,13 @@ class SingleSoundPipeline:
             
             print(f"📍 Direction: {angle}°")
             
-            # 2. 음원 분리 수행 (single_separator 사용)
+            # 2. Perform audio source separation (using single_separator)
             print("🔍 Starting source separation...")
             
-            # 현재 오디오 파일의 중복 클래스 세트 초기화
+            # Initialize duplicate class set for current audio file
             self.current_sent_classes.clear()
             
-            # single_separator를 사용하여 분리 실행
+            # Execute separation using single_separator
             separated_sources = self.sound_separator.separate_and_process(
                 audio_file, 
                 angle=angle, 
@@ -136,29 +136,29 @@ class SingleSoundPipeline:
                 print(f"✅ Separation completed: {len(separated_sources)} sources")
                 self.stats["successful_separations"] += 1
                 
-                # 백엔드 전송 및 LED 활성화 통계 업데이트
+                # Update backend transmission and LED activation statistics
                 for source in separated_sources:
                     class_name = source['class_name']
                     sound_type = source['sound_type']
                     
-                    # 중복 클래스 체크
+                    # Check duplicate class
                     if class_name in self.current_sent_classes:
                         print(f"⏭️ SKIP: {class_name} ({sound_type}) - Duplicate")
                         self.stats["duplicate_skips"] += 1
                         continue
                     
-                    # 백엔드 전송 통계
+                    # Backend transmission statistics
                     if source.get('backend_sent', False):
                         self.stats["backend_sends"] += 1
                     
-                    # LED 활성화 통계
+                    # LED activation statistics
                     if source.get('led_activated', False):
                         self.stats["led_activations"] += 1
                     
-                    # 현재 오디오 파일의 전송된 클래스 기록
+                    # Record transmitted class for current audio file
                     self.current_sent_classes.add(class_name)
                     
-                    # 간소화된 출력
+                    # Simplified output
                     backend_status = "✅" if source.get('backend_sent', False) else "❌"
                     led_status = "💡" if source.get('led_activated', False) else "⭕"
                     print(f"🎵 {class_name} ({sound_type}) - Backend: {backend_status}, LED: {led_status}")
@@ -174,7 +174,7 @@ class SingleSoundPipeline:
     
     
     def start(self):
-        """파이프라인 시작 - 하나의 스레드에서 순차 실행"""
+        """Start pipeline - sequential execution in one thread"""
         if self.is_running:
             print("⚠️ Pipeline is already running")
             return
@@ -184,10 +184,10 @@ class SingleSoundPipeline:
         print("Mode: Sound Detection → Source Separation → Backend/LED")
         print("=" * 60)
         
-        # 컴포넌트들 초기화
+        # Initialize components
         self._initialize_components()
         
-        # 메인 루프 시작
+        # Start main loop
         self.is_running = True
         
         print("\n✅ Single Thread Sound Pipeline started successfully!")
@@ -206,14 +206,14 @@ class SingleSoundPipeline:
             self.stop()
     
     def stop(self):
-        """파이프라인 중지"""
+        """Stop pipeline"""
         if not self.is_running:
             print("⚠️ Pipeline is not running")
             return
         
         print("🛑 Stopping Single Thread Sound Pipeline...")
         
-        # LED 끄기
+        # Turn off LED
         if self.led_controller:
             self.led_controller.turn_off()
         
@@ -222,7 +222,7 @@ class SingleSoundPipeline:
         self._print_statistics()
     
     def _print_statistics(self):
-        """통계 출력"""
+        """Print statistics"""
         print("\n=== Single Thread Pipeline Statistics ===")
         print(f"Total detected: {self.stats['total_detected']}")
         print(f"Successful separations: {self.stats['successful_separations']}")
@@ -232,11 +232,11 @@ class SingleSoundPipeline:
         print("==========================================\n")
     
     def cleanup(self):
-        """리소스 정리"""
+        """Resource cleanup"""
         if self.is_running:
             self.stop()
         
-        # 컴포넌트 정리
+        # Component cleanup
         if hasattr(self, 'sound_trigger') and self.sound_trigger:
             self.sound_trigger.cleanup()
         if hasattr(self, 'doa_calculator') and self.doa_calculator:
@@ -273,7 +273,7 @@ def main():
     print("💡 LED Control: Activated for danger/help/warning types only")
     print("=" * 60)
     
-    # 파이프라인 실행
+    # Execute pipeline
     with SingleSoundPipeline(
         output_dir=args.output,
         model_name=args.model,

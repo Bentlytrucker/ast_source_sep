@@ -47,9 +47,13 @@ class SingleSoundPipeline:
         """Initialize components"""
         print("=== Single Thread Pipeline Initialization ===")
         
-        # Initialize Sound Trigger
+        # Initialize Sound Trigger (continuous mode for voice recognition)
         print("1. Initializing Sound Trigger...")
-        self.sound_trigger = SoundTrigger(os.path.join(self.output_dir, "recordings"), None)
+        self.sound_trigger = SoundTrigger(
+            os.path.join(self.output_dir, "recordings"), 
+            None, 
+            continuous_mode=True  # Enable continuous recording for voice recognition
+        )
         
         # Initialize DOA Calculator
         print("2. Initializing DOA Calculator...")
@@ -81,15 +85,15 @@ class SingleSoundPipeline:
         print("=== Single Thread Pipeline Ready ===")
     
     def _main_loop(self):
-        """Main loop - sequential processing from sound detection to separation"""
+        """Main loop - continuous recording and sequential processing"""
         while self.is_running:
             try:
-                # 1. 소리 감지 및 녹음
+                # 1. 연속 녹음 및 멀티채널 오디오 캡처
                 recorded_file = self.sound_trigger.start_monitoring()
                 
                 if recorded_file and self.is_running:
                     self.stats["total_detected"] += 1
-                    print(f"\n🎵 Processing: {os.path.basename(recorded_file)}")
+                    print(f"\n🎵 Processing multi-channel audio: {os.path.basename(recorded_file)}")
                     
                     # Record recording completion time
                     recording_end_time = datetime.utcnow()
@@ -191,7 +195,8 @@ class SingleSoundPipeline:
         self.is_running = True
         
         print("\n✅ Single Thread Sound Pipeline started successfully!")
-        print("📡 Monitoring for sounds above 100dB...")
+        print("🎤 Continuous recording mode with 6-channel microphone array")
+        print("📡 Channel layout: 0=ASR, 1-4=Microphones, 5=Playback")
         print("🔍 Will process audio separation with type filtering")
         print("📤 Backend: Only danger/help/warning types will be sent")
         print("💡 LED: Only danger/help/warning types will activate LED")

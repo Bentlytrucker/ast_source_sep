@@ -337,6 +337,9 @@ def find_attention_anchor(
     suppressed_regions: List[Tuple[int, int]],
     previous_peaks: List[Tuple[int, int]],
     audio_length: int
+    is_duplicate_detected: bool = False,
+    previous_anchors: List[Tuple[int, int]] = None
+
 ) -> Tuple[int, int, bool]:
     """Select anchor from attention matrix"""
     num_freq_patches, num_time_patches = attention_matrix.shape
@@ -349,7 +352,17 @@ def find_attention_anchor(
         start_patch = int(start * num_time_patches / (L_MODEL // HOP))
         end_patch = int(end * num_time_patches / (L_MODEL // HOP))
         att_masked[:, max(0, start_patch):min(num_time_patches, end_patch)] *= 0.05
-    
+        
+    if is_duplicate_detected and previous_anchors:
+        print(f"  🔄 Duplicate classification detected - restricting previous anchor regions")
+        for anchor_start, anchor_end in previous_anchors:
+            # 앵커를 패치 좌표로 변환
+            start_patch = int(anchor_start * num_time_patches / max_frames)
+            end_patch = int(anchor_end * num_time_patches / max_frames)
+            
+            # 이전 앵커 영역을 강하게 억제 (0.01배로 감소)
+            att_masked[:, max(0, start_patch):min(num_time_patches, end_patch)] *= 0.01
+            print(f"    Suppressed anchor region: frames {anchor_start}-{anchor_end} (patches {start_patch}-{end_patch})")
     # 이전 패스의 상위 어텐션 영역 약화
     if previous_peaks:
         for start, end in previous_peaks:
@@ -403,7 +416,33 @@ def find_attention_anchor(
         elif freq_idx >= 8:  # 고주파
             freq_weight = 1.1
         
-        score = len(segment) * segment_attention * freq_weight
+        if is_duplicate_detected:
+            
+            continuity_weight = 1.0 + (len(segment) / 10.0)
+            
+      
+            attention_weight = 1.0 + segment_attention
+            
+            
+            position_weight = 1.0
+            if previous_anchors:
+                min_distance = float('inf')
+                segment_center = np.mean(segment)
+                for prev_start, prev_end in previous_anchors:
+                    prev_center = (prev_start + prev_end) / 2
+                    prev_center_patch = prev_center * num_time_patches / max_frames
+                    distance = abs(segment_center - prev_center_patch)
+                    min_distance = min(min_distance, distance)
+                
+               
+                position_weight = 1.0 + min(2.0, min_distance / 10.0)
+            
+            score = len(segment) * segment_attention * freq_weight * continuity_weight * attention_weight * position_weight
+            print(f"    Segment at freq {freq_idx}, pos {segment[0]}-{segment[-1]}: "
+                  f"attention={segment_attention:.3f}, continuity={continuity_weight:.2f}, "
+                  f"position={position_weight:.2f}, score={score:.3f}")
+        else:
+            score = len(segment) * segment_attention * freq_weight
         
         if score > best_score:
             best_score = score
@@ -559,7 +598,10 @@ def process_single_pass(
     ast_processor: ASTProcessor,
     suppressed_regions: List[Tuple[int, int]],
     previous_peaks: List[Tuple[int, int]],
-    pass_idx: int
+    pass_idx: int,
+    previous_classifications: List[str] = None,
+    is_duplicate_detected: bool = False,
+    previous_anchors: List[Tuple[int, int]] = None
 ) -> Optional[SeparationResult]:
     """Single pass audio source separation"""
     
@@ -573,7 +615,8 @@ def process_single_pass(
     
     # 앵커 선정
     anchor_start, anchor_end, is_valid = find_attention_anchor(
-        attention_matrix, suppressed_regions, previous_peaks, len(audio_4sec)
+        attention_matrix, suppressed_regions, previous_peaks, len(audio_4sec),
+        is_duplicate_detected, previous_anchors
     )
     
     if not is_valid:
@@ -625,16 +668,34 @@ def multi_pass_separation(
     results = []
     suppressed_regions = []
     previous_peaks = []
+    previous_classifications = []
     
     current_4sec = audio_4sec.copy()
     current_10sec = audio_10sec.copy()
     
+    
     for i in range(max_passes):
         print(f"\n=== Pass {i + 1}/{max_passes} ===")
+        is_duplicate_detected = False
+        previous_anchors = []
+        
+        if i >= 1 and len(previous_classifications) > 0:
+            # 이전 패스의 분류 결과들과 비교할 수 있도록 임시로 AST 처리
+            temp_attention_matrix, temp_classification, _ = ast_processor.process(current_10sec)
+            current_class = temp_classification['predicted_class']
+            
+            # 이전 분류와 비교
+            if current_class in previous_classifications:
+                is_duplicate_detected = True
+                # 이전 결과들의 앵커 정보 수집
+                for prev_result in results:
+                    previous_anchors.append(prev_result.anchor_frames)
+                print(f"  🔄 Duplicate classification detected: '{current_class}' (same as previous pass)")
         
         result = process_single_pass(
             current_4sec, current_10sec, ast_processor,
-            suppressed_regions, previous_peaks, i
+            suppressed_regions, previous_peaks, i,
+            previous_classifications, is_duplicate_detected, previous_anchors
         )
         
         if result is None or result.energy_ratio < 0.0001:
@@ -709,6 +770,7 @@ def multi_pass_separation(
         result.db_mean = db_mean
         result.occurred_at = occurred_at
         result.angle = angle
+        previous_classifications.append(class_name)
         
         # Store attention peaks for next pass
         att_mean = np.mean(result.attention_matrix, axis=0)

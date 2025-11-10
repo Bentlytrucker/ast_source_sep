@@ -1,14 +1,13 @@
 # ast_source_sep
 # AST-guided Source Separator
 
-AST(Audio Spectrogram Transformer) 모델을 활용한 음원 분리 시스템 주파수 어텐션 맵 캐싱을 통해 AST 모델 호출을 최적화하고, 소리 크기에 따른 적응적 분리 전략을 제공.
+AST(Audio Spectrogram Transformer) 모델을 활용한 음원 분리 파이프라인.
 <img src="debug_pass_1.png" width="800" alt="분리 시각화">
 
 ## 🎯 주요 특징
 
 - **적응적 분리**: 소리 크기에 따른 보수적/공격적 분리 전략
 - **실시간 분류**: 분리된 소리를 실시간으로 분류 및 백엔드 전송
-- **디버그 시각화**: 분리 과정의 상세한 시각화 제공
 
 ## 🚀 설치 및 실행
 
@@ -119,13 +118,8 @@ is_weak_sound = energy_ratio < 0.1  # 전체 에너지의 10% 미만
 ### 오디오 파일
 - `00_separated.wav`: 첫 번째 분리된 소리
 - `01_separated.wav`: 두 번째 분리된 소리
-- `02_separated.wav`: 세 번째 분리된 소리
-- `03_residual.wav`: 잔여 소리
+- `02_residual.wav`: 잔여 소리
 
-### 디버그 이미지 (--debug 옵션)
-- `debug_pass_1.png`: 첫 번째 패스 시각화
-- `debug_pass_2.png`: 두 번째 패스 시각화
-- `debug_pass_3.png`: 세 번째 패스 시각화
 
 ## 🔧 성능 최적화
 
@@ -136,7 +130,6 @@ is_weak_sound = energy_ratio < 0.1  # 전체 에너지의 10% 미만
 
 ### 연산 최적화
 - **멀티스레딩**: `torch.set_num_threads(4)` 설정
-- **GPU 지원**: CUDA 자동 감지 및 활용
 - **배치 처리**: 효율적인 텐서 연산
 
 ## 📈 성능 지표
@@ -146,12 +139,6 @@ is_weak_sound = energy_ratio < 0.1  # 전체 에너지의 10% 미만
 - **AST 호출**: 3회 이내
 - **에너지 보존**: 95% 이상
 
-### 모니터링
-```python
-# 성능 로그 예시
-✅ SUCCESS: Completed in 3.2s (< 4s target)
-✅ SUCCESS: Used 3 AST calls (<= 3 target)
-```
 
 ## 🐛 문제 해결
 
@@ -169,21 +156,5 @@ is_weak_sound = energy_ratio < 0.1  # 전체 에너지의 10% 미만
    ```
    - 해결: `pip install torchaudio==2.5.1 --force-reinstall`
 
-3. **메모리 부족**
-   - 해결: `--device cpu` 옵션 사용
   
-     
-
-## 📝 라이선스
-
-이 프로젝트는 연구 및 교육 목적으로 개발되었습니다.
-
-## 🤝 기여
-
-버그 리포트나 기능 제안은 이슈를 통해 제출해 주세요.
-
----
-
-**개발자**: AST-guided Source Separation Team  
-**버전**: 2.0  
-**최종 업데이트**: 2024년 9월
+   
